@@ -1,11 +1,71 @@
 # MP4 金句片段筛选导出工作台 - AI 接管文档
 
-更新时间：2026-08-04  
+更新时间：2026-08-05  
 项目目录：`C:\Users\Neko\Documents\Codex\2026-07-30\mp4-deepseek-mp4-sop`  
 当前主服务：`http://127.0.0.1:8767/`  
-当前前端脚本版本：`/static/app.js?v=rt28`
+当前前端脚本版本：`/static/app.js?v=rt37`  
+GitHub 仓库：`https://github.com/Neko-2077/mp4-golden-clip-workbench`（public）
 
 > 这份文档用于让其他 AI 或开发者顺利接管本项目继续开发。请优先读取本文件，再看 `app.py`、`static/index.html`、`static/app.js`、`static/app.css`。
+
+## 0. 重大更新（2026-08-05）
+
+### 0.1 移除本地 Whisper 转写
+
+- 用户决策：**只保留火山引擎转写**，放弃本地 Whisper。
+- 已删除：`local_transcribe_worker`、`TRANSCRIBE_PRESETS`、`resolve_transcribe_preset`、health check 里的 whisper、`handle_transcribe_start` 和 retry 里的 local 分支。
+- `transcribe_worker` 现在无条件走 `volcengine_transcribe_worker`。
+- `requirements.txt` 只剩 `tos>=2.9.0`（opencc 也删了，只被 whisper 用过）。
+- 前端本来就只有火山 UI（`transcribeEngine` 隐藏 input 固定 `volcengine_bigmodel`）。
+
+### 0.2 Electron 桌面版（desktop/）
+
+- 新增 `desktop/`：Electron 33 + electron-builder 25 + electron-updater 6 打包的桌面应用。
+- `desktop/main.js`：启动后端（打包后 spawn `resources/backend/app.exe`，开发模式 spawn `python app.py`）、随机空闲端口（8767 起）、BrowserWindow 加载本地后端、自动更新（GitHub provider）、IPC（preload 桥接）。
+- `desktop/preload.js`：`window.appBridge`（getVersion / checkForUpdates / downloadUpdate / installUpdate / onUpdateStatus）。
+- 前端顶部新增更新区（仅 Electron 环境显示）：当前版本、检查更新按钮、下载进度条、立即更新按钮。逻辑在 `static/app.js` 的 `initUpdater()`。
+- **构建命令**（在 desktop/）：
+  ```powershell
+  npm install
+  CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win nsis -c.win.signAndEditExecutable=false
+  ```
+- **发布新版本流程**：
+  1. 改 `desktop/package.json` 的 `version`。
+  2. 重新构建（如上）。
+  3. 创建 release + 上传资产（用 curl 上传大文件更稳，见 0.3）。
+
+### 0.3 自动更新（GitHub Releases）
+
+- electron-updater，provider=github（Neko-2077/mp4-golden-clip-workbench）。
+- 每次打开软件（打包版）8 秒后自动检查更新；有新版自动下载（前端进度条显示），下载完可点"立即更新"安装。
+- 手动"检查更新"按钮在页面顶部。
+- **坑：Windows 上中文文件名资产会导致 latest.yml 的 url 与实际资产名不匹配（自动更新 404）**。已通过 `win.artifactName: "mp4-golden-clip-workbench-setup-${version}.${ext}"` 强制 ASCII 文件名解决。
+- **坑：gh release create 上传 272MB 大文件易中断**。可靠方式：先 `gh release create v1.0.x --draft=false`（不带资产），再用 curl 直传 uploads.github.com：
+  ```bash
+  RID=$(gh api repos/Neko-2077/mp4-golden-clip-workbench/releases --jq '.[] | select(.tag_name=="v1.0.x") | .id')
+  curl -X POST -H "Authorization: token $(gh auth token)" -H "Content-Type: application/octet-stream" \
+    --data-binary @"dist/mp4-golden-clip-workbench-setup-1.0.x.exe" \
+    "https://uploads.github.com/repos/Neko-2077/mp4-golden-clip-workbench/releases/$RID/assets?name=mp4-golden-clip-workbench-setup-1.0.x.exe"
+  ```
+  blockmap 和 latest.yml 同理。不要用 `gh release upload`（会因会话中断丢资产）。
+- 端到端已验证：v1.0.0 启动后自动检测 v1.0.1、自动下载 272MB 完成（`%LOCALAPPDATA%\mp4-golden-clip-workbench-updater\pending\` 出现正式文件 + update-info.json）。
+
+### 0.4 打包后的数据目录
+
+- PyInstaller onefile 打包后 `__file__` 指向临时解压目录，**数据必须持久化**。
+- `app.py` 顶部已处理：frozen 模式下数据/配置写到 `%APPDATA%\MP4GoldenClipWorkbench`（data、user-settings.json），静态资源和 bin 从 `_MEIPASS` 读取。
+- 后端打包命令（项目根目录）：
+  ```powershell
+  pyinstaller --noconfirm --clean --onefile --name app --add-data "static;static" --add-binary "bin/ffmpeg.exe;bin" --add-binary "bin/ffprobe.exe;bin" --collect-all tos --noconsole app.py
+  ```
+  产物 `dist/app.exe` 复制到 `desktop/resources/backend/app.exe`。
+- ffmpeg/ffprobe 从本机 WinGet 目录拷贝到项目 `bin/`（已 gitignore）。
+
+### 0.5 关键词搜索功能（rt32-rt37 期间新增）
+
+- 文字稿面板下方新增"关键词搜索"区：输入词（空格分隔多词 AND）→ 搜索 → 显示 `[起点 - 终点] 句子`，关键词 `<mark>` 高亮。
+- 点击结果：视频跳转到句子起点并**暂停**，手动裁切面板自动同步（开头=起点、结尾=终点），可直接微调保存。
+- 前端版本已到 rt37。
 
 ## 1. 项目目标
 
