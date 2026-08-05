@@ -1,0 +1,61 @@
+{
+  "name": "mp4-golden-clip-workbench",
+  "productName": "MP4金句片段工作台",
+  "version": "1.0.0",
+  "description": "MP4 金句片段筛选导出工作台：上传视频、火山引擎转写、DeepSeek 选金句、预览微调、原画质导出",
+  "main": "main.js",
+  "author": "Neko-2077",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis",
+    "dist:portable": "electron-builder --win portable",
+    "publish": "electron-builder --win nsis --publish always"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
+  "build": {
+    "appId": "com.neko.mp4goldenclip",
+    "productName": "MP4金句片段工作台",
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/backend",
+        "to": "backend",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "resources/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "MP4金句片段工作台"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Neko-2077",
+        "repo": "mp4-golden-clip-workbench"
+      }
+    ]
+  }
+}

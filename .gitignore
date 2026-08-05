@@ -28,3 +28,5 @@ bin/ffprobe.exe
 # === 系统 ===
 .DS_Store
 Thumbs.db
+desktop/resources/backend/
+desktop/resources/icon.ico

@@ -17,8 +17,18 @@ from pathlib import Path
 from uuid import uuid4
 
 
-ROOT = Path(__file__).resolve().parent
-STATIC_DIR = ROOT / "static"
+# 打包成 exe 后（PyInstaller onefile），__file__ 指向临时解压目录，
+# 用户数据/配置必须放到 %APPDATA% 下持久保存；静态资源和 bin 从解压目录读取。
+if getattr(sys, "frozen", False):
+    APP_DATA_DIR = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming")) / "MP4GoldenClipWorkbench"
+    RES_ROOT = Path(getattr(sys, "_MEIPASS", APP_DATA_DIR))
+    ROOT = APP_DATA_DIR
+    STATIC_DIR = RES_ROOT / "static"
+    BIN_DIR = RES_ROOT / "bin"
+else:
+    ROOT = Path(__file__).resolve().parent
+    STATIC_DIR = ROOT / "static"
+    BIN_DIR = ROOT / "bin"
 DATA_DIR = ROOT / "data"
 JOBS_DIR = DATA_DIR / "jobs"
 RUNTIME_DIR = DATA_DIR / "runtime"
@@ -97,14 +107,14 @@ def clip_filename(index, title, start, end):
 
 
 def ffmpeg_path():
-    bundled = ROOT / "bin" / "ffmpeg.exe"
+    bundled = BIN_DIR / "ffmpeg.exe"
     if bundled.exists():
         return str(bundled)
     return shutil.which("ffmpeg") or "ffmpeg"
 
 
 def ffprobe_path():
-    bundled = ROOT / "bin" / "ffprobe.exe"
+    bundled = BIN_DIR / "ffprobe.exe"
     if bundled.exists():
         return str(bundled)
     return shutil.which("ffprobe") or "ffprobe"

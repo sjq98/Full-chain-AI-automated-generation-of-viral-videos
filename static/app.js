@@ -72,6 +72,14 @@ const el = {
   transcriptSearchButton: $("transcriptSearchButton"),
   transcriptSearchResults: $("transcriptSearchResults"),
   transcriptSearchCount: $("transcriptSearchCount"),
+  updaterPanel: $("updaterPanel"),
+  updaterVersion: $("updaterVersion"),
+  checkUpdateButton: $("checkUpdateButton"),
+  updateStatusText: $("updateStatusText"),
+  updateProgressWrap: $("updateProgressWrap"),
+  updateProgressBar: $("updateProgressBar"),
+  updateProgressText: $("updateProgressText"),
+  installUpdateButton: $("installUpdateButton"),
   progressBar: $("progressBar"),
   jobMessage: $("jobMessage"),
   stageStat: $("stageStat"),
@@ -1670,6 +1678,82 @@ function startSafetyPolling() {
   }, 2000);
 }
 
+function formatBytes(bytes) {
+  if (!bytes || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(1)} ${units[unit]}`;
+}
+
+function initUpdater() {
+  const bridge = window.appBridge;
+  if (!bridge || !el.updaterPanel) return; // 纯浏览器模式不显示更新区
+  el.updaterPanel.hidden = false;
+
+  const setStatus = (text, color) => {
+    if (el.updateStatusText) {
+      el.updateStatusText.textContent = text;
+      el.updateStatusText.style.color = color || "";
+    }
+  };
+
+  bridge
+    .getVersion()
+    .then((version) => {
+      if (el.updaterVersion) el.updaterVersion.textContent = `v${version}`;
+    })
+    .catch(() => {});
+
+  el.checkUpdateButton?.addEventListener("click", async () => {
+    el.checkUpdateButton.disabled = true;
+    setStatus("\u6b63\u5728\u68c0\u67e5\u66f4\u65b0...");
+    try {
+      await bridge.checkForUpdates(true);
+    } catch (err) {
+      setStatus(`\u68c0\u67e5\u5931\u8d25\uff1a${err.message}`);
+      el.checkUpdateButton.disabled = false;
+    }
+  });
+
+  el.installUpdateButton?.addEventListener("click", () => {
+    bridge.installUpdate();
+  });
+
+  bridge.onUpdateStatus((state) => {
+    if (state.checking) {
+      setStatus("\u6b63\u5728\u68c0\u67e5\u66f4\u65b0...");
+    } else if (state.error) {
+      setStatus(`\u66f4\u65b0\u51fa\u9519\uff1a${state.error}`);
+      el.checkUpdateButton.disabled = false;
+      if (el.updateProgressWrap) el.updateProgressWrap.hidden = true;
+    } else if (state.available && !state.downloading && !state.downloaded) {
+      setStatus(`\u53d1\u73b0\u65b0\u7248\u672c v${state.available.version}\uff0c\u6b63\u5728\u4e0b\u8f7d...`);
+      el.checkUpdateButton.disabled = false;
+      bridge.downloadUpdate();
+    } else if (state.downloading) {
+      if (el.updateProgressWrap) el.updateProgressWrap.hidden = false;
+      if (el.updateProgressBar) el.updateProgressBar.style.width = `${state.progress}%`;
+      if (el.updateProgressText) {
+        el.updateProgressText.textContent = `\u4e0b\u8f7d\u4e2d ${state.progress}% (${formatBytes(state.transferred)} / ${formatBytes(state.total)})`;
+      }
+      setStatus("");
+    } else if (state.downloaded) {
+      if (el.updateProgressWrap) el.updateProgressWrap.hidden = true;
+      if (el.installUpdateButton) el.installUpdateButton.hidden = false;
+      setStatus(`\u65b0\u7248\u672c v${state.available?.version || ""} \u5df2\u4e0b\u8f7d\uff0c\u70b9\u51fb\u53f3\u4fa7\u6309\u94ae\u5b89\u88c5`);
+    } else {
+      // update-not-available
+      if (!state.available) setStatus("\u5df2\u662f\u6700\u65b0\u7248\u672c");
+      el.checkUpdateButton.disabled = false;
+    }
+  });
+}
+
 async function boot() {
   startSafetyPolling();
   await refreshTasks();
@@ -1677,6 +1761,7 @@ async function boot() {
   await refreshSettings();
   syncTranscribeEngineUI();
   await refreshStorage();
+  initUpdater();
   const items = await refreshLibrary();
   if (!state.jobId && items && items.length) {
     await loadJob(items[0].job_id);

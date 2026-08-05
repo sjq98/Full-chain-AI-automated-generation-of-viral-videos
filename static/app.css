@@ -806,3 +806,35 @@ input[type="range"] {
   color: var(--muted);
   padding: 10px 2px;
 }
+
+/* ===== updater (Electron) ===== */
+.updater {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.updater-version {
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+.updater-status {
+  font-size: 13px;
+  color: var(--muted);
+  max-width: 320px;
+}
+.updater-progress-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 200px;
+}
+.updater-progress-wrap .progress-bar {
+  flex: 1;
+  min-width: 120px;
+}

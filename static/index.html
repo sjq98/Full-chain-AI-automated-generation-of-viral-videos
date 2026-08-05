@@ -14,6 +14,16 @@
           <p>&#19978;&#20256;&#12289;&#36716;&#20889;&#12289;&#20998;&#26512;&#12289;&#25286;&#29255;&#12289;&#39044;&#35272;&#12289;&#30830;&#35748;&#12289;&#23548;&#20986;&#65292;&#19968;&#26465;&#32447;&#32473;&#21098;&#36753;&#24072;&#36208;&#23436;&#12290;</p>
         </div>
         <div class="status-pill" id="globalStatus">&#31561;&#24453;&#19978;&#20256;</div>
+        <div class="updater" id="updaterPanel" hidden>
+          <span class="updater-version" id="updaterVersion"></span>
+          <button id="checkUpdateButton" type="button">&#26816;&#26597;&#26356;&#26032;</button>
+          <span id="updateStatusText" class="updater-status"></span>
+          <div class="updater-progress-wrap" id="updateProgressWrap" hidden>
+            <div class="progress-bar"><span id="updateProgressBar"></span></div>
+            <span id="updateProgressText" class="updater-status"></span>
+          </div>
+          <button id="installUpdateButton" type="button" hidden>&#31435;&#21363;&#26356;&#26032;</button>
+        </div>
       </header>
 
       <section class="workspace">
@@ -229,6 +239,6 @@
         </div>
       </section>
     </main>
-    <script src="/static/app.js?v=rt36"></script>
+    <script src="/static/app.js?v=rt37"></script>
   </body>
 </html>
