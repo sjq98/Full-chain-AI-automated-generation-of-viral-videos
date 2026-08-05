@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MP4 &#37329;&#21477;&#29255;&#27573;&#31579;&#36873;&#23548;&#20986;&#24037;&#20316;&#21488;</title>
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>MP4 &#37329;&#21477;&#29255;&#27573;&#31579;&#36873;&#23548;&#20986;&#24037;&#20316;&#21488;</h1>
+          <p>&#19978;&#20256;&#12289;&#36716;&#20889;&#12289;&#20998;&#26512;&#12289;&#25286;&#29255;&#12289;&#39044;&#35272;&#12289;&#30830;&#35748;&#12289;&#23548;&#20986;&#65292;&#19968;&#26465;&#32447;&#32473;&#21098;&#36753;&#24072;&#36208;&#23436;&#12290;</p>
+        </div>
+        <div class="status-pill" id="globalStatus">&#31561;&#24453;&#19978;&#20256;</div>
+      </header>
+
+      <section class="workspace">
+        <div class="left-pane">
+          <section class="panel upload-panel">
+            <div class="panel-head">
+              <h2>&#21407;&#35270;&#39057;</h2>
+              <div class="source-head-actions">
+                <button id="previewTopButton" type="button" disabled>&#29983;&#25104;&#20860;&#23481;&#39044;&#35272;</button>
+                <label class="file-button">
+                  <input id="fileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" />
+                  &#36873;&#25321; MP4 / MOV
+                </label>
+              </div>
+            </div>
+            <video id="sourceVideo" controls playsinline></video>
+            <div class="metadata" id="metadata">&#36824;&#27809;&#26377;&#36733;&#20837;&#35270;&#39057;&#12290;</div>
+            <div class="source-trim" id="sourceTrimPanel" hidden>
+              <div class="source-trim-head">
+                <div>
+                  <strong id="activeClipTitle">未选择片段</strong>
+                  <span id="sourceTimeText">00:00:00.000</span>
+                </div>
+                <label>拖动灵敏度
+                  <select id="trimSensitivity">
+                    <option value="coarse">快速定位</option>
+                    <option value="normal" selected>标准</option>
+                    <option value="fine">精细</option>
+                    <option value="frame">逐帧</option>
+                  </select>
+                </label>
+              </div>
+              <div class="trim-readout-grid">
+                <label>开头时间<input id="trimStartInput" type="text" placeholder="00:00:00.000" title="&#21487;&#25163;&#21160;&#22635;&#20889;&#65292;&#22914; 00:00:05.500 &#25110; 05.5" /></label>
+                <label>结尾时间<input id="trimEndInput" type="text" placeholder="00:00:00.000" title="&#21487;&#25163;&#21160;&#22635;&#20889;&#65292;&#22914; 00:01:10 &#25110; 70" /></label>
+                <label>片段时长<input id="trimDurationInput" type="text" readonly /></label>
+              </div>
+              <div class="trim-slider-stack">
+                <label class="trim-slider-label"><span>拖动开头</span><input id="trimStartRange" type="range" min="0" max="1" step="0.02" value="0" /></label>
+                <label class="trim-slider-label"><span>拖动结尾</span><input id="trimEndRange" type="range" min="0" max="1" step="0.02" value="1" /></label>
+              </div>
+              <div class="trim-fine-panel">
+                <div class="trim-focus-row">
+                  <button id="focusTrimStart" class="ghost" type="button">精调开头</button>
+                  <button id="focusTrimEnd" class="ghost" type="button">精调结尾</button>
+                  <span id="trimFineLabel">精调开头 ±5秒</span>
+                </div>
+                <input id="trimFineRange" type="range" min="-5" max="5" step="0.02" value="0" />
+              </div>
+              <div class="clip-actions">
+                <button id="setStartFromCurrent" type="button">当前画面设为开头</button>
+                <button id="setEndFromCurrent" type="button">当前画面设为结尾</button>
+                <button id="saveTrimButton" class="primary" type="button">保存剪切时间</button>
+                <button id="renderActivePreviewButton" type="button">生成这条预览</button>
+              </div>
+            </div>
+            <div class="preview-status" id="previewStatus" hidden>
+              <div class="preview-status-top">
+                <span id="previewStatusText">&#20860;&#23481;&#39044;&#35272;&#31561;&#24453;&#20013;</span>
+                <span id="previewStatusPercent">0%</span>
+              </div>
+              <div class="progress-bar"><span id="previewProgressBar"></span></div>
+              <div class="small" id="previewStatusTime">&#24050;&#29992; 00:00&#65292;&#21097;&#20313;&#35745;&#31639;&#20013;</div>
+            </div>
+            <div class="transcribe-options unified-transcribe-options">
+              <input id="transcribeEngine" type="hidden" value="volcengine_bigmodel" />
+              <div id="cloudTranscribeOptions" class="volcengine-options simple-config">
+                <div class="config-head">
+                  <div>
+                    <strong>&#28779;&#23665;&#35821;&#38899;&#36716;&#20889;</strong>
+                    <div class="small">&#29992;&#25143;&#21482;&#19978;&#20256;&#35270;&#39057;&#65307;&#24037;&#20855;&#21488;&#20250;&#33258;&#21160;&#25552;&#21462;&#38899;&#39057;&#12289;&#19978;&#20256; TOS&#12289;&#29983;&#25104; URL&#65292;&#20877;&#25552;&#20132;&#28779;&#23665;&#35782;&#21035;&#12290;</div>
+                  </div>
+                  <div class="config-badges">
+                    <span id="volcengineState">&#28779;&#23665;&#26410;&#37197;&#32622;</span>
+                    <span id="tosState">TOS &#26410;&#37197;&#32622;</span>
+                  </div>
+                </div>
+                <div class="config-grid primary-config">
+                  <label>&#28779;&#23665; API Key<input id="volcengineApiKey" type="password" placeholder="&#35821;&#38899;&#35782;&#21035;&#25511;&#21046;&#21488; API Key" /></label>
+                  <label>Resource ID<input id="volcengineResourceId" type="text" value="volc.seedasr.auc" placeholder="volc.seedasr.auc" /></label>
+                  <label>TOS AK<input id="tosAccessKey" type="text" placeholder="Access Key ID" /></label>
+                  <label>TOS SK<input id="tosSecretKey" type="password" placeholder="Secret Access Key" /></label>
+                  <label>TOS Bucket<input id="tosBucket" type="text" placeholder="&#26742;&#21517;" /></label>
+                  <label>Endpoint<input id="tosEndpoint" type="text" placeholder="tos-cn-beijing.volces.com" /></label>
+                  <label>Region<input id="tosRegion" type="text" placeholder="cn-beijing" /></label>
+                </div>
+                <details class="advanced-config">
+                  <summary>&#39640;&#32423;/&#20828;&#24213;&#35774;&#32622;</summary>
+                  <div class="config-grid">
+                    <label>&#38899;&#39057;&#20844;&#32593; URL&#65288;&#21487;&#36873;&#65289;<input id="volcengineAudioUrl" type="text" placeholder="&#27491;&#24120;&#30041;&#31354;&#65307;&#24037;&#20855;&#21488;&#20250;&#33258;&#21160;&#19978;&#20256; TOS &#29983;&#25104; URL" /></label>
+                    <label>&#36718;&#35810;&#38388;&#38548;&#31186;<input id="volcenginePollInterval" type="number" min="2" max="30" step="1" value="5" /></label>
+                    <label>TOS &#23545;&#35937;&#21069;&#32512;<input id="tosPrefix" type="text" value="mp4-golden-asr" /></label>
+                    <label>URL &#26377;&#25928;&#31186;<input id="tosUrlExpires" type="number" min="60" max="604800" step="60" value="86400" /></label>
+                  </div>
+                </details>
+                <div class="config-actions">
+                  <button id="saveAllCloudButton" class="primary" type="button">&#20445;&#23384;&#28779;&#23665;/TOS &#37197;&#32622;</button>
+                  <button id="clearVolcengineButton" class="danger" type="button">&#28165;&#38500;&#28779;&#23665;</button>
+                  <button id="clearTosButton" class="danger" type="button">&#28165;&#38500; TOS</button>
+                </div>
+              </div>
+            </div>
+            <div class="button-row">
+              <button id="uploadButton" class="primary" disabled>&#19978;&#20256;&#21040;&#26412;&#22320;&#26381;&#21153;</button>
+              <button id="previewButton" disabled>&#29983;&#25104;&#20860;&#23481;&#39044;&#35272;</button>
+              <button id="transcribeButton" disabled>&#24320;&#22987;&#36716;&#20889;</button>
+              <button id="pauseButton" disabled>&#26242;&#20572;</button>
+              <button id="stopButton" class="danger" disabled>&#32467;&#26463;</button>
+              <button id="resetVideoButton" type="button">&#37325;&#32622;&#24403;&#21069;&#35270;&#39057;</button>
+            </div>
+          </section>
+
+          <section class="panel transcript-panel">
+            <div class="panel-head">
+              <h2>&#36716;&#20889;&#25991;&#23383;&#31295;</h2>
+              <span id="transcriptCount">0 &#27573;</span>
+            </div>
+            <div class="transcribe-stats" id="transcribeStats">
+              <span id="stageStat">&#31561;&#24453;&#20219;&#21153;</span>
+              <span id="elapsedStat">&#24050;&#29992; 00:00</span>
+              <span id="positionStat">&#24050;&#22788;&#29702; 00:00:00.000 / --</span>
+              <span id="segmentsStat">0 &#27573;</span>
+            </div>
+            <div class="progress-wrap">
+              <div class="progress-bar"><span id="progressBar"></span></div>
+              <div id="jobMessage">&#31561;&#24453;&#20219;&#21153;&#12290;</div>
+            </div>
+            <div class="transcript-tools">
+              <span id="transcriptModeText">&#23436;&#25972;&#26174;&#31034;&#25991;&#23383;&#31295;</span>
+              <button id="copyTranscriptButton" type="button">&#22797;&#21046;&#20840;&#37096;&#25991;&#23383;&#31295;</button>
+              <button id="resetTranscriptButton" type="button">&#37325;&#26032;&#36733;&#20837;</button>
+              <button id="clearTranscriptViewButton" type="button">&#28165;&#31354;&#26174;&#31034;</button>
+            </div>
+            <div class="transcript" id="transcript"></div>
+          </section>
+
+          <section class="panel transcript-search-panel">
+            <div class="panel-head">
+              <h2>&#20851;&#38190;&#35789;&#25628;&#32034;</h2>
+              <span id="transcriptSearchCount"></span>
+            </div>
+            <div class="search-row">
+              <input id="transcriptSearchInput" type="text" placeholder="&#36755;&#20837;&#20851;&#38190;&#35789;&#65292;&#22810;&#20010;&#35789;&#29992;&#31354;&#26684;&#20998;&#38548;&#65288;&#37117;&#21629;&#20013;&#25165;&#26174;&#31034;&#65289;" />
+              <button id="transcriptSearchButton" class="primary" type="button">&#25628;&#32034;</button>
+            </div>
+            <div id="transcriptSearchResults" class="search-results">
+              <div class="search-empty">&#35831;&#36755;&#20837;&#20851;&#38190;&#35789;&#21518;&#28857;&#20987;&#25628;&#32034;&#12290;</div>
+            </div>
+            <div class="small">&#28857;&#20987;&#32467;&#26524;&#21487;&#36339;&#36716;&#21407;&#35270;&#39057;&#21040;&#35813;&#26102;&#21051;&#12290;</div>
+          </section>
+        </div>
+
+        <div class="right-pane">
+          <section class="panel analyze-panel">
+            <div class="panel-head">
+              <h2>DeepSeek &#37329;&#21477;&#20998;&#26512;</h2>
+            </div>
+            <div class="form-grid">
+              <label>API Key<input id="apiKey" type="password" placeholder="sk-..." autocomplete="off" /></label>
+              <label>&#30446;&#26631;&#29255;&#27573;&#25968;<input id="clipCount" type="number" min="1" max="50" value="20" /></label>
+              <label>&#26368;&#30701;&#31186;&#25968;<input id="minSeconds" type="number" min="3" max="120" value="8" /></label>
+              <label>&#26368;&#38271;&#31186;&#25968;<input id="maxSeconds" type="number" min="5" max="180" value="45" /></label>
+            </div>
+            <label class="checkline"><input id="saveKey" type="checkbox" checked />&#20445;&#23384; Key &#21040;&#26412;&#26426; user-settings.json</label>
+            <div class="button-row" style="margin-bottom:8px">
+              <button id="saveKeyButton" class="ghost" type="button">&#20445;&#23384; Key</button>
+              <button id="clearKeyButton" class="ghost danger" type="button">&#28165;&#38500; Key</button>
+              <span id="keyState">&#26410;&#20445;&#23384; Key</span>
+            </div>
+            <div class="button-row">
+              <button id="analyzeButton" class="primary" disabled>&#20998;&#26512;&#37329;&#21477;&#29255;&#27573;</button>
+              <span id="analyzeStatus" class="status-text"></span>
+              <button id="renderAllButton" disabled>&#29983;&#25104;&#20840;&#37096;&#39044;&#35272;</button>
+              <button id="exportButton" disabled>&#23548;&#20986;&#24050;&#30830;&#35748;&#29255;&#27573;</button>
+              <button id="resetAnalyzeButton" type="button">&#37325;&#32622;&#20998;&#26512;&#21442;&#25968;</button>
+            </div>
+            <label class="export-path">&#23548;&#20986;&#30446;&#24405;
+              <div class="export-row"><input id="exportDirectory" type="text" placeholder="&#30041;&#31354;&#21017;&#23548;&#20986;&#21040;&#20219;&#21153;&#30340; clips/exports &#25991;&#20214;&#22841;" /><button id="chooseExportDirectoryButton" type="button">&#36873;&#25321;&#25991;&#20214;&#22841;</button><button id="clearExportDirectoryButton" type="button">&#28165;&#31354;</button></div>
+            </label>
+            <div class="small">&#26368;&#32456;&#23548;&#20986;&#20351;&#29992;&#21407;&#35270;&#39057;&#30721;&#27969;&#22797;&#21046;&#65288;-c copy&#65289;&#65292;&#19981;&#37325;&#26032;&#32534;&#30721;&#65292;&#30011;&#36136;&#21644;&#21407;&#35270;&#39057;&#20445;&#25345;&#19968;&#33268;&#12290;</div>
+          </section>
+
+
+          <section class="panel task-center-panel">
+            <div class="panel-head"><h2>&#20219;&#21153;&#20013;&#24515;</h2><span id="taskSummary">0 &#20010;&#20219;&#21153;</span></div>
+            <div class="button-row">
+              <button id="refreshTasksButton" type="button">&#21047;&#26032;&#20219;&#21153;</button>
+              <button id="clearFinishedTasksButton" type="button">&#28165;&#29702;&#24050;&#23436;&#25104;</button>
+            </div>
+            <div id="taskList" class="task-list">&#26242;&#26080;&#21518;&#21488;&#20219;&#21153;&#12290;</div>
+          </section>
+
+          <section class="panel clips-panel">
+            <div class="panel-head"><h2>&#20505;&#36873;&#29255;&#27573;</h2><span id="clipSummary">0 &#20010;&#20505;&#36873;</span><button id="clearClipsButton" class="danger" type="button">&#28165;&#31354;&#20505;&#36873;</button></div>
+            <div id="clips" class="clips-empty">DeepSeek &#20998;&#26512;&#21518;&#20250;&#22312;&#36825;&#37324;&#20986;&#29616;&#21487;&#39044;&#35272;&#30340;&#20505;&#36873;&#29255;&#27573;&#12290;</div>
+          </section>
+
+
+          <section class="panel storage-panel">
+            <div class="panel-head"><h2>&#23384;&#20648;&#31649;&#29702;</h2><button id="refreshStorageButton" type="button">&#21047;&#26032;</button></div>
+            <div class="storage-summary" id="storageSummary">&#23384;&#20648;&#20449;&#24687;&#35835;&#21462;&#20013;</div>
+            <div class="button-row">
+              <button id="cleanBrowserPreviewButton" type="button">&#28165;&#29702;&#20860;&#23481;&#39044;&#35272;</button>
+              <button id="cleanClipPreviewButton" type="button">&#28165;&#29702;&#20505;&#36873;&#39044;&#35272;</button>
+              <button id="cleanAudioCacheButton" type="button">&#28165;&#29702;&#38899;&#39057;&#32531;&#23384;</button>
+            </div>
+            <div id="storageList" class="storage-list"></div>
+          </section>
+          <section class="panel history-panel">
+            <div class="panel-head"><h2>&#21382;&#21490;&#35760;&#24405;</h2><button id="refreshLibraryButton">&#21047;&#26032;</button></div>
+            <div id="library" class="library"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+    <script src="/static/app.js?v=rt36"></script>
+  </body>
+</html>
