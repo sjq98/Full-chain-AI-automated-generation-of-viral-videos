@@ -59,6 +59,7 @@ const el = {
   renderAllButton: $("renderAllButton"),
   exportButton: $("exportButton"),
   refreshLibraryButton: $("refreshLibraryButton"),
+  clearLibraryButton: $("clearLibraryButton"),
   sourceVideo: $("sourceVideo"),
   metadata: $("metadata"),
   previewStatus: $("previewStatus"),
@@ -1260,7 +1261,12 @@ async function pollAnalyzeTask(taskId) {
     const task = data.task;
     await refreshTasks();
     const percent = task.percent ?? Math.round((task.progress || 0) * 100);
-    el.analyzeStatus.textContent = `${task.message || "DeepSeek \u5206\u6790\u4e2d"} \u00b7 \u8fdb\u5ea6 ${percent}% \u00b7 \u5df2\u7528 ${formatShortTime(task.elapsed || 0)}`;
+    const elapsed = task.elapsed || 0;
+    let message = task.message || "DeepSeek \u5206\u6790\u4e2d";
+    if (task.status === "running" && elapsed > 90) {
+      message = `${message}\uff08\u54cd\u5e94\u8f83\u6162\uff0c\u8bf7\u7ee7\u7eed\u7b49\u5f85\uff1b\u8d85\u8fc7 2 \u5206\u949f\u53ef\u68c0\u67e5\u7f51\u7edc\u540e\u91cd\u8bd5\uff09`;
+    }
+    el.analyzeStatus.textContent = `${message} \u00b7 \u8fdb\u5ea6 ${percent}% \u00b7 \u5df2\u7528 ${formatShortTime(elapsed)}`;
     if (task.status === "done") {
       state.highlights = task.highlights || { clips: [] };
       renderClips();
@@ -1623,6 +1629,25 @@ if (el.setStartFromCurrent) {
   });
 }
 el.refreshLibraryButton.addEventListener("click", refreshLibrary);
+
+if (el.clearLibraryButton) {
+  el.clearLibraryButton.addEventListener("click", async () => {
+    if (!confirm("\u786e\u5b9a\u6e05\u7a7a\u5168\u90e8\u5386\u53f2\u8bb0\u5f55\u5417\uff1f\u6240\u6709\u4efb\u52a1\u7684\u4e0a\u4f20\u89c6\u9891\u3001\u8f6c\u5199\u7ed3\u679c\u3001\u5019\u9009\u7247\u6bb5\u548c\u5bfc\u51fa\u8bb0\u5f55\u90fd\u4f1a\u88ab\u6c38\u4e45\u5220\u9664\uff01")) return;
+    el.clearLibraryButton.disabled = true;
+    try {
+      const data = await api("/api/library/clear-all", { method: "POST", body: JSON.stringify({}) });
+      resetCurrentVideoView();
+      await refreshLibrary();
+      await refreshTasks();
+      await refreshStorage();
+      toast(`\u5386\u53f2\u8bb0\u5f55\u5df2\u5168\u90e8\u6e05\u7a7a\uff08\u5220\u9664 ${data.removed || 0} \u4e2a\u4efb\u52a1\uff09\u3002`);
+    } catch (err) {
+      toast(`\u6e05\u7a7a\u5931\u8d25\uff1a${err.message}`);
+    } finally {
+      el.clearLibraryButton.disabled = false;
+    }
+  });
+}
 el.previewButton.addEventListener("click", requestBrowserPreview);
 el.previewTopButton?.addEventListener("click", requestBrowserPreview);
 if (el.refreshStorageButton) el.refreshStorageButton.addEventListener("click", refreshStorage);

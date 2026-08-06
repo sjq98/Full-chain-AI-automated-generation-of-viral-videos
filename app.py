@@ -1294,13 +1294,17 @@ def analyze_worker(task_id, job_id, payload):
         set_job(job_id, stage="analyzing", message="DeepSeek \u5206\u6790\u5df2\u5f00\u59cb", analyze_task_id=task_id)
         if clip_task_cancelled(task_id):
             raise RuntimeError("Analysis task cancelled")
-        set_clip_task(task_id, status="running", progress=0.20, elapsed=max(0, time.time() - started), message="\u6b63\u5728\u8bf7\u6c42 DeepSeek \u7b5b\u9009\u91d1\u53e5\u7247\u6bb5")
+        set_clip_task(task_id, status="running", progress=0.20, elapsed=max(0, time.time() - started), message="\u5df2\u53d1\u9001\u7ed9 DeepSeek\uff0cAI \u6b63\u5728\u5206\u6790\uff08\u901a\u5e38\u9700\u8981 30-90 \u79d2\uff0c\u8bf7\u8010\u5fc3\u7b49\u5f85\uff09")
         highlights = deepseek_analyze(job_id, payload)
         if clip_task_cancelled(task_id):
             raise RuntimeError("Analysis task cancelled")
+        set_clip_task(task_id, status="running", progress=0.90, elapsed=max(0, time.time() - started), message="AI \u5df2\u8fd4\u56de\u7ed3\u679c\uff0c\u6b63\u5728\u8fc7\u6ee4\u3001\u53bb\u91cd\u3001\u6392\u5e8f")
         count = len(highlights.get("clips", []))
         set_job(job_id, stage="analyzed", message=f"Found {count} candidate clips", analyze_task_id=task_id)
         set_clip_task(task_id, status="done", progress=1, remaining=0, elapsed=max(0, time.time() - started), message=f"\u5206\u6790\u5b8c\u6210\uff0c\u627e\u5230 {count} \u4e2a\u5019\u9009\u7247\u6bb5", highlights=highlights)
+    except TimeoutError:
+        set_job(job_id, stage="error", message="DeepSeek \u54cd\u5e94\u8d85\u65f6\uff08\u7ea6 120 \u79d2\uff09\uff0c\u8bf7\u68c0\u67e5\u7f51\u7edc\u540e\u91cd\u8bd5", error="DeepSeek timeout", analyze_task_id=task_id)
+        set_clip_task(task_id, status="error", progress=0, remaining=0, elapsed=max(0, time.time() - started), message="DeepSeek \u54cd\u5e94\u8d85\u65f6\uff08\u7ea6 120 \u79d2\uff09\uff0c\u8bf7\u68c0\u67e5\u7f51\u7edc\u540e\u91cd\u8bd5", error="DeepSeek timeout")
     except Exception as exc:
         status = "cancelled" if "cancel" in str(exc).lower() else "error"
         set_job(job_id, stage="error" if status == "error" else "analyze_cancelled", message=str(exc), error=str(exc), analyze_task_id=task_id)
@@ -1632,6 +1636,21 @@ def list_library():
     return items
 
 
+def clear_library():
+    """删除全部历史任务目录并清空内存中的任务状态。"""
+    removed = 0
+    with JOB_LOCK:
+        JOBS.clear()
+    with CLIP_TASK_LOCK:
+        CLIP_TASKS.clear()
+    if JOBS_DIR.exists():
+        for path in list(JOBS_DIR.glob("*")):
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+                removed += 1
+    return {"removed": removed}
+
+
 class Handler(SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print("[%s] %s" % (datetime.now().strftime("%H:%M:%S"), fmt % args))
@@ -1760,6 +1779,8 @@ class Handler(SimpleHTTPRequestHandler):
                     json_response(self, {"ok": True, "removed": clear_finished_clip_tasks(payload.get("job_id") or None), "tasks": list_clip_tasks(job_id=payload.get("job_id") or None)})
                 elif path == "/api/tasks/retry":
                     json_response(self, {"ok": True, "task": retry_clip_task(payload.get("task_id"))})
+                elif path == "/api/library/clear-all":
+                    json_response(self, {"ok": True, **clear_library()})
                 else:
                     self.send_error(404)
         except Exception as exc:
