@@ -30,3 +30,4 @@ bin/ffprobe.exe
 Thumbs.db
 desktop/resources/backend/
 desktop/resources/icon.ico
+.hermes/
