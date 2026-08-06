@@ -17,6 +17,12 @@ from pathlib import Path
 from uuid import uuid4
 
 
+# 本工具为本地直连服务，只访问火山/DeepSeek 公网 API。
+# 若用户系统设置了代理（如 Clash 127.0.0.1:7890）但代理软件未运行，
+# requests/urllib 会走代理导致连接失败（WinError 10061）。这里统一禁用代理。
+for _proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+    os.environ.pop(_proxy_var, None)
+
 # 打包成 exe 后（PyInstaller onefile），__file__ 指向临时解压目录，
 # 用户数据/配置必须放到 %APPDATA% 下持久保存；静态资源和 bin 从解压目录读取。
 if getattr(sys, "frozen", False):
@@ -60,6 +66,17 @@ def json_response(handler, payload, status=200):
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+
+
+_NO_PROXY_OPENER = None
+
+
+def http_opener():
+    """返回不读取系统/环境变量代理的 urllib opener，保证直连火山/DeepSeek。"""
+    global _NO_PROXY_OPENER
+    if _NO_PROXY_OPENER is None:
+        _NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return _NO_PROXY_OPENER
 
 
 def error_response(handler, message, status=400, **extra):
@@ -846,7 +863,7 @@ def volcengine_bigmodel_request(url, body, api_key, resource_id, request_id, tim
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_opener().open(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
             headers = {k.lower(): v for k, v in resp.headers.items()}
             return {"body": json.loads(raw or "{}"), "headers": headers, "http_status": resp.status}
@@ -1139,7 +1156,7 @@ Transcript:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with http_opener().open(req, timeout=120) as resp:
             result = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
