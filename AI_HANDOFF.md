@@ -67,6 +67,16 @@ GitHub 仓库：`https://github.com/Neko-2077/mp4-golden-clip-workbench`（publi
 - 点击结果：视频跳转到句子起点并**暂停**，手动裁切面板自动同步（开头=起点、结尾=终点），可直接微调保存。
 - 前端版本已到 rt37。
 
+### 0.6 v1.0.2 代理修复（2026-08-06）
+
+- **问题**：别人的电脑上 TOS 上传失败：`ProxyError: Unable to connect to proxy, HTTPSConnection(host='127.0.0.1', port=7890)`（Clash 端口）。用户系统设置了代理但代理软件没运行，Python requests/urllib 读环境变量代理导致连接被拒。
+- **修复**（app.py）：
+  1. 模块加载时清除 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY`（大小写）环境变量 —— 影响 tos SDK 内部的 requests 请求。
+  2. 新增 `http_opener()`（`build_opener(ProxyHandler({}))`），火山 BigModel 请求和 DeepSeek 请求改用无代理 opener。
+- 本工具是本地直连服务，只访问火山/DeepSeek 公网 API，禁用代理是安全的。
+- 已发布 v1.0.2（当前 latest），用户软件会自动更新获取修复。
+- 验证：ad-hoc 脚本 3/3（代理环境变量被清除、opener 无代理、直连 DeepSeek 成功）+ 发布契约 8/8。
+
 ## 1. 项目目标
 
 这是一个给剪辑师使用的本地网页工作台。目标是从长 MP4/MOV 视频中筛选“金句”片段，并让用户可以预览、微调、确认、导出精华短视频。
