@@ -1,7 +1,7 @@
 {
   "name": "mp4-golden-clip-workbench",
   "productName": "MP4金句片段工作台",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "MP4 金句片段筛选导出工作台：上传视频、火山引擎转写、DeepSeek 选金句、预览微调、原画质导出",
   "main": "main.js",
   "author": "Neko-2077",
@@ -84,7 +84,7 @@
       "artifactName": "mp4-golden-clip-workbench-mac-${version}-${arch}.${ext}",
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
-      "identity": null
+      "identity": "-"
     }
   }
 }
