@@ -1,4 +1,4 @@
-﻿import cgi
+import cgi
 import json
 import mimetypes
 import os
@@ -26,7 +26,13 @@ for _proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "http
 # 打包成 exe 后（PyInstaller onefile），__file__ 指向临时解压目录，
 # 用户数据/配置必须放到 %APPDATA% 下持久保存；静态资源和 bin 从解压目录读取。
 if getattr(sys, "frozen", False):
-    APP_DATA_DIR = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming")) / "MP4GoldenClipWorkbench"
+    if sys.platform == "darwin":
+        data_base = Path.home() / "Library" / "Application Support"
+    elif os.name == "nt":
+        data_base = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
+    else:
+        data_base = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
+    APP_DATA_DIR = data_base / "MP4GoldenClipWorkbench"
     RES_ROOT = Path(getattr(sys, "_MEIPASS", APP_DATA_DIR))
     ROOT = APP_DATA_DIR
     STATIC_DIR = RES_ROOT / "static"
@@ -123,18 +129,22 @@ def clip_filename(index, title, start, end):
     return f"{index:03d}_{safe_title}_{seconds_to_clock(start).replace(':', '-')}_to_{seconds_to_clock(end).replace(':', '-')}.mp4"
 
 
+def bundled_binary(name):
+    candidates = [BIN_DIR / name]
+    if os.name == "nt":
+        candidates.insert(0, BIN_DIR / f"{name}.exe")
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return shutil.which(name) or name
+
+
 def ffmpeg_path():
-    bundled = BIN_DIR / "ffmpeg.exe"
-    if bundled.exists():
-        return str(bundled)
-    return shutil.which("ffmpeg") or "ffmpeg"
+    return bundled_binary("ffmpeg")
 
 
 def ffprobe_path():
-    bundled = BIN_DIR / "ffprobe.exe"
-    if bundled.exists():
-        return str(bundled)
-    return shutil.which("ffprobe") or "ffprobe"
+    return bundled_binary("ffprobe")
 
 
 def run_process(cmd):
@@ -2235,5 +2245,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

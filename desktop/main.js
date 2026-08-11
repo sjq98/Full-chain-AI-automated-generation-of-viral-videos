@@ -37,11 +37,17 @@ function findFreePort(startPort, attempts = 50) {
 
 function backendCommand() {
   if (isPackaged()) {
-    // 打包后：后端 exe 位于 resources/backend/app.exe
-    const exe = path.join(process.resourcesPath, "backend", "app.exe");
+    const backendName = process.platform === "win32" ? "app.exe" : "app";
+    const exe = path.join(process.resourcesPath, "backend", backendName);
+    if (process.platform !== "win32") {
+      try {
+        fs.chmodSync(exe, 0o755);
+      } catch (_) {
+        /* best effort */
+      }
+    }
     return { cmd: exe, args: [] };
   }
-  // 开发模式：直接用 python 跑项目根目录的 app.py
   const projectRoot = path.resolve(__dirname, "..");
   return { cmd: "python", args: [path.join(projectRoot, "app.py")] };
 }

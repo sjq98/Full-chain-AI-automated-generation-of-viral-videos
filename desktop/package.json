@@ -1,7 +1,7 @@
 {
   "name": "mp4-golden-clip-workbench",
   "productName": "MP4金句片段工作台",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "MP4 金句片段筛选导出工作台：上传视频、火山引擎转写、DeepSeek 选金句、预览微调、原画质导出",
   "main": "main.js",
   "author": "Neko-2077",
@@ -10,7 +10,8 @@
     "start": "electron .",
     "dist": "electron-builder --win nsis",
     "dist:portable": "electron-builder --win portable",
-    "publish": "electron-builder --win nsis --publish always"
+    "publish": "electron-builder --win nsis --publish always",
+    "dist:mac": "electron-builder --mac dmg zip --publish never"
   },
   "devDependencies": {
     "electron": "^33.0.0",
@@ -31,14 +32,18 @@
       {
         "from": "resources/backend",
         "to": "backend",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "resources/icon.ico",
@@ -57,6 +62,29 @@
         "owner": "Neko-2077",
         "repo": "mp4-golden-clip-workbench"
       }
-    ]
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.video",
+      "artifactName": "mp4-golden-clip-workbench-mac-${version}-${arch}.${ext}",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "identity": null
+    }
   }
 }
