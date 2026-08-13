@@ -3,7 +3,7 @@ const state = {
   localUrl: null,
   jobId: null,
   metadata: null,
-  transcript: { segments: [] },
+  transcript: { segments: [], groups: [] },
   highlights: { clips: [] },
   pollTimer: null,
   taskTimer: null,
@@ -15,6 +15,12 @@ const state = {
   trimFocus: "start",
   trimFineBase: 0,
   trimSensitivity: "normal",
+  analyzeTaskId: null,
+  openJobIds: [],
+  jobMeta: {},
+  libraryItems: [],
+  taskFilter: "active",
+  currentView: "workbench",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -30,6 +36,18 @@ function escapeHtml(value) {
 }
 
 const el = {
+  appViews: {
+    workbench: $("workbenchView"),
+    tasks: $("tasksView"),
+    storage: $("storageView"),
+  },
+  navItems: Array.from(document.querySelectorAll("[data-view]")),
+  viewTitle: $("viewTitle"),
+  viewSubtitle: $("viewSubtitle"),
+  workbenchTabs: $("workbenchTabs"),
+  activeTaskCount: $("activeTaskCount"),
+  taskFilterActive: $("taskFilterActive"),
+  taskFilterCompleted: $("taskFilterCompleted"),
   fileInput: $("fileInput"),
   uploadButton: $("uploadButton"),
   previewButton: $("previewButton"),
@@ -56,6 +74,8 @@ const el = {
   pauseButton: $("pauseButton"),
   stopButton: $("stopButton"),
   analyzeButton: $("analyzeButton"),
+  pauseAnalyzeButton: $("pauseAnalyzeButton"),
+  stopAnalyzeButton: $("stopAnalyzeButton"),
   renderAllButton: $("renderAllButton"),
   exportButton: $("exportButton"),
   refreshLibraryButton: $("refreshLibraryButton"),
@@ -73,14 +93,6 @@ const el = {
   transcriptSearchButton: $("transcriptSearchButton"),
   transcriptSearchResults: $("transcriptSearchResults"),
   transcriptSearchCount: $("transcriptSearchCount"),
-  updaterPanel: $("updaterPanel"),
-  updaterVersion: $("updaterVersion"),
-  checkUpdateButton: $("checkUpdateButton"),
-  updateStatusText: $("updateStatusText"),
-  updateProgressWrap: $("updateProgressWrap"),
-  updateProgressBar: $("updateProgressBar"),
-  updateProgressText: $("updateProgressText"),
-  installUpdateButton: $("installUpdateButton"),
   progressBar: $("progressBar"),
   jobMessage: $("jobMessage"),
   stageStat: $("stageStat"),
@@ -102,6 +114,9 @@ const el = {
   analyzeStatus: $("analyzeStatus"),
   exportDirectory: $("exportDirectory"),
   copyTranscriptButton: $("copyTranscriptButton"),
+  openTranscriptFolderButton: $("openTranscriptFolderButton"),
+  saveTranscriptAsButton: $("saveTranscriptAsButton"),
+  transcriptFileLocation: $("transcriptFileLocation"),
   transcriptModeText: $("transcriptModeText"),
   chooseExportDirectoryButton: $("chooseExportDirectoryButton"),
   sourceTrimPanel: $("sourceTrimPanel"),
@@ -125,7 +140,7 @@ const el = {
   taskList: $("taskList"),
   refreshTasksButton: $("refreshTasksButton"),
   clearFinishedTasksButton: $("clearFinishedTasksButton"),
-  resetVideoButton: $("resetVideoButton"),
+  newTaskButton: $("newTaskButton"),
   resetTranscriptButton: $("resetTranscriptButton"),
   clearTranscriptViewButton: $("clearTranscriptViewButton"),
   resetAnalyzeButton: $("resetAnalyzeButton"),
@@ -255,6 +270,7 @@ function syncCompletedTasks(tasks) {
   tasks.forEach((task) => {
     if (task.status !== "done") return;
     if (state.syncedTaskIds.has(task.task_id)) return;
+    if (task.job_id !== state.jobId) return;
     const shouldSync = state.trackedTaskIds.has(task.task_id) || ["analyze", "export", "transcribe"].includes(task.type);
     if (!shouldSync) return;
     if (task.highlights) {
@@ -272,7 +288,7 @@ function syncCompletedTasks(tasks) {
   if (changed) renderClips();
 }
 
-async function refreshTasks() {
+async function refreshTasksLegacy() {
   if (!el.taskList || !el.taskSummary) return;
   const suffix = state.jobId ? `?job_id=${encodeURIComponent(state.jobId)}&limit=20` : "?limit=20";
   const data = await api(`/api/tasks${suffix}`);
@@ -318,7 +334,7 @@ async function refreshTasks() {
 
 async function clearFinishedTasks() {
   if (!el.taskList) return;
-  const data = await api("/api/tasks/clear-finished", { method: "POST", body: JSON.stringify({ job_id: state.jobId || null }) });
+  const data = await api("/api/tasks/clear-finished", { method: "POST", body: JSON.stringify({ job_id: null }) });
   toast(`已清理 ${data.removed || 0} 个已完成任务记录。`);
   await refreshTasks();
 }
@@ -365,16 +381,17 @@ function updateTranscribeStats(job = {}) {
 }
 
 function updatePreviewStatus(job) {
-  if (!job || !["previewing", "preview_ready", "preview_error"].includes(job.stage)) return;
+  const previewStage = job?.preview_stage || (["previewing", "preview_ready", "preview_error"].includes(job?.stage) ? job.stage : null);
+  if (!previewStage) return;
   el.previewStatus.hidden = false;
   const progress = typeof job.preview_progress === "number" ? Math.max(0, Math.min(1, job.preview_progress)) : 0;
   const percent = Math.round(progress * 100);
   el.previewProgressBar.style.width = `${percent}%`;
-  el.previewStatusPercent.textContent = job.stage === "preview_error" ? "\u5931\u8d25" : `${percent}%`;
-  el.previewStatusText.textContent = job.message || "\u6b63\u5728\u751f\u6210\u6d4f\u89c8\u5668\u517c\u5bb9\u9884\u89c8 MP4";
-  if (job.stage === "preview_ready") {
+  el.previewStatusPercent.textContent = previewStage === "preview_error" ? "\u5931\u8d25" : `${percent}%`;
+  el.previewStatusText.textContent = job.preview_message || (["previewing", "preview_ready", "preview_error"].includes(job?.stage) ? job.message : "") || "\u6b63\u5728\u751f\u6210\u6d4f\u89c8\u5668\u517c\u5bb9\u9884\u89c8 MP4";
+  if (previewStage === "preview_ready") {
     el.previewStatusTime.textContent = "\u517c\u5bb9\u9884\u89c8\u5df2\u5b8c\u6210\uff0c\u53ef\u4ee5\u6b63\u5e38\u67e5\u770b\u753b\u9762\u3002";
-  } else if (job.stage === "preview_error") {
+  } else if (previewStage === "preview_error") {
     el.previewStatusTime.textContent = "\u751f\u6210\u5931\u8d25\uff0c\u53ef\u4ee5\u7ee7\u7eed\u8f6c\u5199\uff1b\u6700\u7ec8\u5bfc\u51fa\u4ecd\u4f1a\u5c1d\u8bd5\u4f7f\u7528\u539f\u89c6\u9891\u3002";
   } else {
     el.previewStatusTime.textContent = `\u5df2\u7528 ${formatShortTime(job.preview_elapsed)}\uff0c\u9884\u8ba1\u5269\u4f59 ${formatShortTime(job.preview_remaining)}`;
@@ -441,7 +458,6 @@ function applyBrowserPreviewIfReady(job) {
     el.sourceVideo.addEventListener("loadedmetadata", () => {
       el.sourceVideo.currentTime = Math.min(currentTime, el.sourceVideo.duration || currentTime);
     }, { once: true });
-    toast("\u5df2\u5207\u6362\u5230\u6d4f\u89c8\u5668\u517c\u5bb9\u9884\u89c8\u3002\u539f\u59cb\u89c6\u9891\u4ecd\u4f1a\u7528\u4e8e\u8f6c\u5199\u548c\u5bfc\u51fa\u3002");
   }
   state.metadata = meta;
   updateMetadata(meta);
@@ -462,17 +478,153 @@ async function requestBrowserPreview() {
   startPolling();
 }
 
-function transcriptText(segments = state.transcript.segments) {
-  return (segments || []).map((s) => `[${formatClock(s.start)} - ${formatClock(s.end)}] ${s.text}`).join("\n");
+function groupTranscriptSegments(segments = []) {
+  const groups = [];
+  let current = null;
+  for (const segment of segments) {
+    const text = String(segment?.text || "").trim();
+    if (!text) continue;
+    if (!current) {
+      current = { start: Number(segment.start || 0), end: Number(segment.end || 0), text };
+      continue;
+    }
+    const start = Number(segment.start || 0);
+    const end = Number(segment.end || 0);
+    const mergedText = `${current.text} ${text}`;
+    if (start - current.end > 1.2 || end - current.start > 45 || mergedText.length > 260) {
+      groups.push(current);
+      current = { start, end, text };
+    } else {
+      current.end = end;
+      current.text = mergedText;
+    }
+  }
+  if (current) groups.push(current);
+  return groups;
 }
 
-function updateTranscript(segments) {
-  state.transcript = { segments: segments || [] };
-  const count = state.transcript.segments.length;
-  el.transcriptCount.textContent = `${count} 段`;
-  if (el.transcriptModeText) el.transcriptModeText.textContent = count ? `完整显示 ${count} 段文字稿` : "完整显示文字稿";
+function switchView(view) {
+  const next = ["workbench", "tasks", "storage"].includes(view) ? view : "workbench";
+  state.currentView = next;
+  Object.entries(el.appViews || {}).forEach(([key, node]) => { if (node) node.hidden = key !== next; });
+  (el.navItems || []).forEach((button) => {
+    const active = button.dataset.view === next;
+    button.classList.toggle("active", active);
+    if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
+  });
+  const titles = {
+    workbench: ["工作台", "转写、分析、裁剪与导出"],
+    tasks: ["任务中心", "总览所有视频的后台处理进度"],
+    storage: ["存储管理", "按原视频查看本地结果文件"],
+  };
+  if (el.viewTitle) el.viewTitle.textContent = titles[next][0];
+  if (el.viewSubtitle) el.viewSubtitle.textContent = titles[next][1];
+  if (next === "tasks") refreshTasks().catch(() => {});
+  if (next === "storage") { refreshLibrary().catch(() => {}); refreshStorage().catch(() => {}); }
+}
+
+function renderWorkbenchTabs() {
+  if (!el.workbenchTabs) return;
+  el.workbenchTabs.innerHTML = "";
+  const ids = state.openJobIds || [];
+  if (!ids.length) {
+    el.workbenchTabs.innerHTML = '<div class="tabs-empty">上传视频后会在这里生成任务标签</div>';
+    return;
+  }
+  ids.forEach((jobId) => {
+    const meta = state.jobMeta[jobId] || {};
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = `workbench-tab ${jobId === state.jobId ? "active" : ""}`;
+    tab.title = meta.title || jobId;
+    tab.innerHTML = `<span class="tab-status ${meta.statusClass || ""}"></span><span class="tab-label">${escapeHtml(meta.title || jobId)}</span><span class="tab-close" aria-label="关闭">×</span>`;
+    tab.addEventListener("click", (event) => {
+      if (event.target.closest(".tab-close")) {
+        closeJobTab(jobId);
+        return;
+      }
+      loadJob(jobId);
+    });
+    el.workbenchTabs.appendChild(tab);
+  });
+}
+
+function ensureJobTab(jobId, meta = {}) {
+  if (!jobId) return;
+  if (!state.openJobIds.includes(jobId)) state.openJobIds.push(jobId);
+  state.jobMeta[jobId] = { ...(state.jobMeta[jobId] || {}), ...meta };
+  renderWorkbenchTabs();
+}
+
+function closeJobTab(jobId) {
+  state.openJobIds = state.openJobIds.filter((id) => id !== jobId);
+  delete state.jobMeta[jobId];
+  if (state.jobId === jobId) {
+    const next = state.openJobIds[state.openJobIds.length - 1];
+    if (next) loadJob(next);
+    else resetCurrentVideoView({ keepTabs: true });
+  }
+  renderWorkbenchTabs();
+}
+
+function transcriptText(groups = state.transcript.groups) {
+  return (groups || []).map((group) => `[${formatClock(group.start)} - ${formatClock(group.end)}] ${group.text}`).join("\n\n");
+}
+
+function updateTranscriptFileLocation(files = null) {
+  if (!el.transcriptFileLocation) return;
+  const path = files?.markdown;
+  el.transcriptFileLocation.textContent = path ? `结果文件夹：${files.folder}` : "完成转写后会在视频结果文件夹中保存 transcript_grouped.md";
+}
+
+function updateTranscript(segments, groups = null) {
+  const rawSegments = segments || [];
+  const groupedSegments = Array.isArray(groups) && groups.length ? groups : groupTranscriptSegments(rawSegments);
+  state.transcript = { segments: rawSegments, groups: groupedSegments };
+  const count = groupedSegments.length;
+  el.transcriptCount.textContent = `${count} 组`;
+  if (el.transcriptModeText) el.transcriptModeText.textContent = count ? `按时间分组显示 ${count} 组文字稿` : "按时间分组显示文字稿";
   el.transcript.textContent = transcriptText();
-  el.analyzeButton.disabled = !state.jobId || count === 0;
+  el.analyzeButton.disabled = !state.jobId || rawSegments.length === 0;
+}
+
+function setAnalyzeControls(task = null) {
+  const active = task && ["queued", "running", "paused"].includes(task.status);
+  if (el.pauseAnalyzeButton) {
+    el.pauseAnalyzeButton.disabled = !active;
+    el.pauseAnalyzeButton.textContent = task?.status === "paused" ? "继续分析" : "暂停分析";
+  }
+  if (el.stopAnalyzeButton) el.stopAnalyzeButton.disabled = !active;
+}
+
+function transcriptSegmentKey(segment) {
+  const id = segment?.id;
+  if (id !== undefined && id !== null && String(id).trim()) return `id:${id}`;
+  return `time:${Number(segment?.start || 0)}:${Number(segment?.end || 0)}:${String(segment?.text || "")}`;
+}
+
+function mergeTranscriptSegments(incomingSegments) {
+  if (!Array.isArray(incomingSegments) || incomingSegments.length === 0) return false;
+
+  const mergedByKey = new Map();
+  for (const segment of state.transcript.segments || []) {
+    if (segment && typeof segment === "object") mergedByKey.set(transcriptSegmentKey(segment), segment);
+  }
+  for (const segment of incomingSegments) {
+    if (segment && typeof segment === "object") mergedByKey.set(transcriptSegmentKey(segment), segment);
+  }
+
+  const merged = Array.from(mergedByKey.values()).sort((a, b) => (
+    Number(a.start || 0) - Number(b.start || 0)
+    || Number(a.end || 0) - Number(b.end || 0)
+    || String(a.id || "").localeCompare(String(b.id || ""))
+  ));
+  const before = (state.transcript.segments || []).map(transcriptSegmentKey).join("\n");
+  const after = merged.map(transcriptSegmentKey).join("\n");
+  if (before === after) return false;
+
+  updateTranscript(merged);
+  return true;
 }
 
 function highlightTerms(text, terms) {
@@ -868,17 +1020,19 @@ async function clearAllClips() {
   state.highlights = data.highlights || { clips: [] };
   state.renderProgress = {};
   state.activeClipId = null;
+  state.analyzeTaskId = null;
   if (el.sourceTrimPanel) el.sourceTrimPanel.hidden = true;
   renderClips();
   await refreshLibrary();
   toast("候选片段已清空，可以重新分析生成。");
 }
 
-function resetCurrentVideoView() {
+function resetCurrentVideoView(options = {}) {
   if (state.localUrl) URL.revokeObjectURL(state.localUrl);
   state.localFile = null;
   state.localUrl = null;
   state.jobId = null;
+  state.activeJobId = null;
   state.metadata = null;
   state.transcript = { segments: [] };
   state.highlights = { clips: [] };
@@ -892,18 +1046,22 @@ function resetCurrentVideoView() {
   setPreviewButtonsDisabled(true);
   el.transcribeButton.disabled = true;
   el.analyzeButton.disabled = true;
+  setAnalyzeControls(null);
   el.renderAllButton.disabled = true;
   el.exportButton.disabled = true;
   if (el.sourceTrimPanel) el.sourceTrimPanel.hidden = true;
   updateTranscript([]);
+  updateTranscriptFileLocation(null);
   renderClips();
+  if (!options.keepTabs) { state.openJobIds = []; state.jobMeta = {}; renderWorkbenchTabs(); }
   toast("当前界面已重置，原始文件和历史任务没有删除。");
 }
 
 async function reloadTranscript() {
   if (!state.jobId) return;
   const data = await api(`/api/job/load?job_id=${encodeURIComponent(state.jobId)}`);
-  updateTranscript(data.transcript.segments);
+  updateTranscript(data.transcript.segments, data.transcript_grouped?.groups);
+  updateTranscriptFileLocation(data.transcript_files);
   toast("文字稿已重新载入。");
 }
 
@@ -1069,7 +1227,7 @@ if (el.clearTosButton) {
   });
 }
 
-async function refreshLibrary() {
+async function refreshLibraryLegacy() {
   const data = await api("/api/library");
   el.library.innerHTML = "";
   if (!data.items.length) {
@@ -1094,9 +1252,20 @@ async function refreshLibrary() {
 
 async function loadJob(jobId) {
   const data = await api(`/api/job/load?job_id=${encodeURIComponent(jobId)}`);
+  ensureJobTab(jobId, { title: data.metadata?.title || jobId });
   state.jobId = jobId;
+  state.activeJobId = jobId;
+  state.activeClipId = null;
+  state.renderProgress = {};
+  state.analyzeTaskId = null;
+  el.pauseButton.disabled = true;
+  el.stopButton.disabled = true;
+  el.pauseButton.textContent = "暂停";
+  if (el.previewStatus) el.previewStatus.hidden = true;
+  renderWorkbenchTabs();
   updateMetadata(data.metadata);
-  updateTranscript(data.transcript.segments);
+  updateTranscript(data.transcript.segments, data.transcript_grouped?.groups);
+  updateTranscriptFileLocation(data.transcript_files);
   state.highlights = data.highlights || { clips: [] };
   el.sourceVideo.src = `/media/${jobId}/${data.metadata.browser_preview_file || data.metadata.original_file || "source.mp4"}`;
   if (data.metadata.browser_preview_file) {
@@ -1117,6 +1286,13 @@ async function loadJob(jobId) {
       refreshTasks().catch(() => {});
       startPolling();
     }
+    if (job.analyze_task_id) {
+      const taskData = await api(`/api/clips/render-status?task_id=${encodeURIComponent(job.analyze_task_id)}`);
+      if (["queued", "running", "paused"].includes(taskData.task?.status)) {
+        state.analyzeTaskId = job.analyze_task_id;
+        setAnalyzeControls(taskData.task);
+      }
+    }
   } catch {}
   toast("\u4efb\u52a1\u5df2\u8f7d\u5165\u3002");
 }
@@ -1132,7 +1308,7 @@ async function refreshFullTranscriptIfBehind(job = {}) {
   const localCount = state.transcript.segments.length || 0;
   if (!serverCount || serverCount <= localCount) return;
   const loaded = await api(`/api/job/load?job_id=${encodeURIComponent(state.jobId)}`);
-  updateTranscript(loaded.transcript.segments);
+  updateTranscript(loaded.transcript.segments, loaded.transcript_grouped?.groups);
 }
 async function refreshJobStatus() {
   if (!state.jobId) return;
@@ -1155,14 +1331,14 @@ async function refreshJobStatus() {
     if (typeof job.progress === "number") {
       el.progressBar.style.width = `${Math.round(job.progress * 100)}%`;
     }
-    if (job.browser_preview_url || job.stage === "preview_ready") {
+    if (job.browser_preview_url || job.preview_stage === "preview_ready" || job.stage === "preview_ready") {
       applyBrowserPreviewIfReady(job);
       const transcribeRunning = el.transcribeButton.disabled && !el.stopButton.disabled;
       if (!transcribeRunning && state.pollTimer) clearInterval(state.pollTimer);
     }
-    if (job.stage === "preview_error") {
+    if (job.preview_stage === "preview_error" || job.stage === "preview_error") {
       setPreviewButtonsDisabled(false);
-      if (state.pollTimer) clearInterval(state.pollTimer);
+      if (job.stage === "preview_error" && state.pollTimer) clearInterval(state.pollTimer);
     }
     if (job.transcript_tail) {
       mergeTranscriptSegments(job.transcript_tail);
@@ -1172,7 +1348,8 @@ async function refreshJobStatus() {
     await refreshFullTranscriptIfBehind(job);
     if (["transcribed", "stopped", "error"].includes(job.stage)) {
       const loaded = await api(`/api/job/load?job_id=${encodeURIComponent(state.jobId)}`);
-      updateTranscript(loaded.transcript.segments);
+      updateTranscript(loaded.transcript.segments, loaded.transcript_grouped?.groups);
+      updateTranscriptFileLocation(loaded.transcript_files);
       if (job.stage !== "error") el.analyzeButton.disabled = loaded.transcript.segments.length === 0;
       el.pauseButton.disabled = true;
       el.stopButton.disabled = true;
@@ -1186,6 +1363,8 @@ async function refreshJobStatus() {
 el.fileInput.addEventListener("change", () => {
   const file = el.fileInput.files[0];
   if (!file) return;
+  // Starting another upload must not close the workbench tabs already in use.
+  if (state.jobId || state.localFile) resetCurrentVideoView({ keepTabs: true });
   state.localFile = file;
   if (state.localUrl) URL.revokeObjectURL(state.localUrl);
   state.localUrl = URL.createObjectURL(file);
@@ -1203,6 +1382,9 @@ el.uploadButton.addEventListener("click", async () => {
   toast("正在上传到本地服务...");
   const data = await api("/api/video/upload", { method: "POST", body: form });
   state.jobId = data.job_id;
+  ensureJobTab(data.job_id, { title: data.metadata?.title || state.localFile.name });
+  state.activeJobId = data.job_id;
+  switchView("workbench");
   updateMetadata(data.metadata);
   el.sourceVideo.src = data.preview_url;
   el.transcribeButton.disabled = false;
@@ -1259,6 +1441,8 @@ async function pollAnalyzeTask(taskId) {
   while (true) {
     const data = await api(`/api/clips/render-status?task_id=${encodeURIComponent(taskId)}`);
     const task = data.task;
+    state.analyzeTaskId = taskId;
+    setAnalyzeControls(task);
     await refreshTasks();
     const percent = task.percent ?? Math.round((task.progress || 0) * 100);
     const elapsed = task.elapsed || 0;
@@ -1274,11 +1458,15 @@ async function pollAnalyzeTask(taskId) {
       const count = (state.highlights.clips || []).length;
       el.analyzeStatus.textContent = `\u5206\u6790\u5b8c\u6210\uff0c\u627e\u5230 ${count} \u4e2a\u5019\u9009\u7247\u6bb5`;
       toast(`\u5206\u6790\u5b8c\u6210\uff0c\u627e\u5230 ${count} \u4e2a\u5019\u9009\u7247\u6bb5\u3002`);
+      state.analyzeTaskId = null;
+      setAnalyzeControls(null);
       return true;
     }
     if (["error", "cancelled"].includes(task.status)) {
       el.analyzeStatus.textContent = `\u5206\u6790\u5931\u8d25\uff1a${task.message || "\u672a\u77e5\u9519\u8bef"}`;
       toast(`\u5206\u6790\u5931\u8d25\uff1a${task.message || "\u672a\u77e5\u9519\u8bef"}`);
+      state.analyzeTaskId = null;
+      setAnalyzeControls(null);
       return false;
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -1300,6 +1488,8 @@ el.analyzeButton.addEventListener("click", async () => {
         max_seconds: Number(el.maxSeconds.value),
       }),
     });
+    state.analyzeTaskId = data.task.task_id;
+    setAnalyzeControls(data.task);
     await refreshTasks();
     el.analyzeStatus.textContent = "\u5206\u6790\u4efb\u52a1\u5df2\u52a0\u5165\u961f\u5217\uff0c\u8fdb\u5ea6\u4f1a\u5728\u8fd9\u91cc\u548c\u4efb\u52a1\u4e2d\u5fc3\u540c\u6b65\u663e\u793a\u3002";
     await pollAnalyzeTask(data.task.task_id);
@@ -1308,6 +1498,7 @@ el.analyzeButton.addEventListener("click", async () => {
     toast(`\u5206\u6790\u5931\u8d25\uff1a${err.message}`);
   } finally {
     el.analyzeButton.disabled = false;
+    if (!state.analyzeTaskId) setAnalyzeControls(null);
   }
 });
 
@@ -1483,7 +1674,7 @@ async function pickExportDirectory(initialDir = "") {
 
 async function exportClips(clipIds = null, options = {}) {
   const exportDir = options.exportDir ?? (el.exportDirectory?.value?.trim() || "");
-  const targetLabel = exportDir || "任务文件夹 clips/exports";
+  const targetLabel = exportDir || "本视频的结果文件夹";
   toast(`已提交原画质导出任务：${targetLabel}`);
   el.exportButton.disabled = true;
   try {
@@ -1518,7 +1709,67 @@ if (el.copyTranscriptButton) {
       return;
     }
     await navigator.clipboard.writeText(text);
-    toast(`已复制完整文字稿，共 ${state.transcript.segments.length} 段。`);
+    toast(`已复制分组文字稿，共 ${state.transcript.groups.length} 组。`);
+  });
+}
+
+if (el.openTranscriptFolderButton) {
+  el.openTranscriptFolderButton.addEventListener("click", async () => {
+    if (!state.jobId) {
+      toast("请先上传或载入一个任务。");
+      return;
+    }
+    try {
+      const data = await api("/api/dialog/open-path", { method: "POST", body: JSON.stringify({ job_id: state.jobId }) });
+      toast(`已打开本视频的结果文件夹：${data.folder}`);
+    } catch (err) {
+      toast(`打开文字稿位置失败：${err.message}`);
+    }
+  });
+}
+
+if (el.saveTranscriptAsButton) {
+  el.saveTranscriptAsButton.addEventListener("click", async () => {
+    if (!state.jobId) {
+      toast("请先上传或载入一个任务。");
+      return;
+    }
+    try {
+      const data = await api("/api/dialog/save-transcript", { method: "POST", body: JSON.stringify({ job_id: state.jobId }) });
+      toast(data.saved ? `文字稿已保存：${data.path}` : "已取消另存文字稿。");
+    } catch (err) {
+      toast(`另存文字稿失败：${err.message}`);
+    }
+  });
+}
+
+async function controlAnalyzeTask(action) {
+  if (!state.analyzeTaskId) return;
+  const data = await api("/api/tasks/control", { method: "POST", body: JSON.stringify({ task_id: state.analyzeTaskId, action }) });
+  setAnalyzeControls(data.task);
+  el.analyzeStatus.textContent = data.task.message || "DeepSeek 分析状态已更新";
+}
+
+if (el.pauseAnalyzeButton) {
+  el.pauseAnalyzeButton.addEventListener("click", async () => {
+    try {
+      const action = el.pauseAnalyzeButton.textContent === "继续分析" ? "resume" : "pause";
+      await controlAnalyzeTask(action);
+    } catch (err) {
+      toast(`更新分析状态失败：${err.message}`);
+    }
+  });
+}
+
+if (el.stopAnalyzeButton) {
+  el.stopAnalyzeButton.addEventListener("click", async () => {
+    if (!confirm("结束本次 DeepSeek 分析？正在等待的结果不会被保存。")) return;
+    try {
+      await controlAnalyzeTask("stop");
+      el.stopAnalyzeButton.disabled = true;
+    } catch (err) {
+      toast(`结束分析失败：${err.message}`);
+    }
   });
 }
 
@@ -1657,17 +1908,16 @@ if (el.clearFinishedTasksButton) el.clearFinishedTasksButton.addEventListener("c
 if (el.cleanBrowserPreviewButton) el.cleanBrowserPreviewButton.addEventListener("click", () => cleanupStorage(["browser_preview"]));
 if (el.cleanClipPreviewButton) el.cleanClipPreviewButton.addEventListener("click", () => cleanupStorage(["clip_previews"]));
 if (el.cleanAudioCacheButton) el.cleanAudioCacheButton.addEventListener("click", () => cleanupStorage(["audio"]));
-if (el.resetVideoButton) el.resetVideoButton.addEventListener("click", resetCurrentVideoView);
+if (el.newTaskButton) el.newTaskButton.addEventListener("click", () => resetCurrentVideoView({ keepTabs: true }));
 if (el.resetTranscriptButton) el.resetTranscriptButton.addEventListener("click", reloadTranscript);
 if (el.clearTranscriptViewButton) el.clearTranscriptViewButton.addEventListener("click", () => { updateTranscript([]); toast("文字稿显示已清空，可点重新载入恢复。"); });
 if (el.clearClipsButton) el.clearClipsButton.addEventListener("click", clearAllClips);
 if (el.resetAnalyzeButton) el.resetAnalyzeButton.addEventListener("click", resetAnalyzeControls);
-if (el.clearExportDirectoryButton) el.clearExportDirectoryButton.addEventListener("click", () => { el.exportDirectory.value = ""; toast("导出目录已清空，将使用任务默认 exports 文件夹。"); });
+if (el.clearExportDirectoryButton) el.clearExportDirectoryButton.addEventListener("click", () => { el.exportDirectory.value = ""; toast("导出目录已清空，将保存到本视频的结果文件夹。"); });
 
 el.sourceVideo.addEventListener("error", async () => {
   if (!state.jobId) return;
   updatePreviewStatus({ stage: "previewing", message: "\u5f53\u524d\u89c6\u9891\u7f16\u7801\u6d4f\u89c8\u5668\u65e0\u6cd5\u76f4\u63a5\u9884\u89c8\uff0c\u6b63\u5728\u751f\u6210\u517c\u5bb9\u9884\u89c8 MP4", preview_progress: 0, preview_elapsed: 0, preview_remaining: null });
-  toast("\u5f53\u524d\u89c6\u9891\u7f16\u7801\u6d4f\u89c8\u5668\u65e0\u6cd5\u76f4\u63a5\u9884\u89c8\uff0c\u6b63\u5728\u751f\u6210\u517c\u5bb9\u9884\u89c8 MP4...");
   try {
     await api("/api/video/browser-preview", { method: "POST", body: JSON.stringify({ job_id: state.jobId }) });
     startPolling();
@@ -1715,69 +1965,65 @@ function formatBytes(bytes) {
   return `${value.toFixed(1)} ${units[unit]}`;
 }
 
-function initUpdater() {
-  const bridge = window.appBridge;
-  if (!bridge || !el.updaterPanel) return; // 纯浏览器模式不显示更新区
-  el.updaterPanel.hidden = false;
-
-  const setStatus = (text, color) => {
-    if (el.updateStatusText) {
-      el.updateStatusText.textContent = text;
-      el.updateStatusText.style.color = color || "";
-    }
-  };
-
-  bridge
-    .getVersion()
-    .then((version) => {
-      if (el.updaterVersion) el.updaterVersion.textContent = `v${version}`;
-    })
-    .catch(() => {});
-
-  el.checkUpdateButton?.addEventListener("click", async () => {
-    el.checkUpdateButton.disabled = true;
-    setStatus("\u6b63\u5728\u68c0\u67e5\u66f4\u65b0...");
-    try {
-      await bridge.checkForUpdates(true);
-    } catch (err) {
-      setStatus(`\u68c0\u67e5\u5931\u8d25\uff1a${err.message}`);
-      el.checkUpdateButton.disabled = false;
-    }
+function renderTaskRow(task) {
+  const meta = state.jobMeta[task.job_id] || {};
+  const percent = task.percent ?? Math.round((task.progress || 0) * 100);
+  const elapsed = formatShortTime(task.elapsed || 0);
+  const canCancel = ["queued", "running"].includes(task.status);
+  const canRetry = ["error", "cancelled"].includes(task.status);
+  const row = document.createElement("div");
+  row.className = `task-item ${taskStatusClass(task.status)}`;
+  row.innerHTML = `
+    <div class="task-item-top"><strong>${escapeHtml(meta.title || task.job_id || "未知视频")} · ${escapeHtml(taskTypeText(task.type))}</strong><span>${escapeHtml(taskStatusText(task.status))} · ${percent}%</span></div>
+    <div class="progress-bar"><span style="width:${Math.max(0, Math.min(100, percent))}%"></span></div>
+    <div class="task-item-bottom"><span>${escapeHtml(task.message || "等待任务状态")} · 已用 ${elapsed}</span><span class="task-item-actions"><button data-action="open-task" type="button">查看</button>${canRetry ? `<button data-task-id="${encodeURIComponent(task.task_id || "")}" data-action="retry-task" type="button">重试</button>` : ""}${canCancel ? `<button data-task-id="${encodeURIComponent(task.task_id || "")}" data-action="cancel-task" type="button">取消</button>` : ""}</span></div>`;
+  row.querySelector("[data-action='open-task']")?.addEventListener("click", () => {
+    ensureJobTab(task.job_id, { title: meta.title || task.job_id });
+    switchView("workbench");
+    loadJob(task.job_id);
   });
-
-  el.installUpdateButton?.addEventListener("click", () => {
-    bridge.installUpdate();
-  });
-
-  bridge.onUpdateStatus((state) => {
-    if (state.checking) {
-      setStatus("\u6b63\u5728\u68c0\u67e5\u66f4\u65b0...");
-    } else if (state.error) {
-      setStatus(`\u66f4\u65b0\u51fa\u9519\uff1a${state.error}`);
-      el.checkUpdateButton.disabled = false;
-      if (el.updateProgressWrap) el.updateProgressWrap.hidden = true;
-    } else if (state.available && !state.downloading && !state.downloaded) {
-      setStatus(`\u53d1\u73b0\u65b0\u7248\u672c v${state.available.version}\uff0c\u6b63\u5728\u4e0b\u8f7d...`);
-      el.checkUpdateButton.disabled = false;
-      bridge.downloadUpdate();
-    } else if (state.downloading) {
-      if (el.updateProgressWrap) el.updateProgressWrap.hidden = false;
-      if (el.updateProgressBar) el.updateProgressBar.style.width = `${state.progress}%`;
-      if (el.updateProgressText) {
-        el.updateProgressText.textContent = `\u4e0b\u8f7d\u4e2d ${state.progress}% (${formatBytes(state.transferred)} / ${formatBytes(state.total)})`;
-      }
-      setStatus("");
-    } else if (state.downloaded) {
-      if (el.updateProgressWrap) el.updateProgressWrap.hidden = true;
-      if (el.installUpdateButton) el.installUpdateButton.hidden = false;
-      setStatus(`\u65b0\u7248\u672c v${state.available?.version || ""} \u5df2\u4e0b\u8f7d\uff0c\u70b9\u51fb\u53f3\u4fa7\u6309\u94ae\u5b89\u88c5`);
-    } else {
-      // update-not-available
-      if (!state.available) setStatus("\u5df2\u662f\u6700\u65b0\u7248\u672c");
-      el.checkUpdateButton.disabled = false;
-    }
-  });
+  row.querySelector("[data-action='retry-task']")?.addEventListener("click", async (event) => { await retryTask(decodeURIComponent(event.currentTarget.dataset.taskId)); });
+  row.querySelector("[data-action='cancel-task']")?.addEventListener("click", async (event) => { await cancelRender(decodeURIComponent(event.currentTarget.dataset.taskId)); await refreshTasks(); });
+  return row;
 }
+
+async function refreshTasks() {
+  if (!el.taskList || !el.taskSummary) return;
+  const data = await api("/api/tasks?limit=100");
+  const tasks = data.tasks || [];
+  const active = tasks.filter((task) => ["queued", "running", "paused"].includes(task.status));
+  syncCompletedTasks(tasks);
+  if (el.activeTaskCount) { el.activeTaskCount.textContent = String(active.length); el.activeTaskCount.hidden = active.length === 0; }
+  const filtered = state.taskFilter === "completed" ? tasks.filter((task) => ["done", "error", "cancelled"].includes(task.status)) : active;
+  el.taskSummary.textContent = `${filtered.length} 个${state.taskFilter === "completed" ? "已完成" : "进行中"}任务 · 共 ${tasks.length} 个`;
+  el.taskList.innerHTML = "";
+  el.taskList.className = filtered.length ? "task-list" : "task-list task-list-empty";
+  if (!filtered.length) { el.taskList.textContent = state.taskFilter === "completed" ? "暂无已完成任务。" : "当前没有进行中的任务。"; return; }
+  filtered.forEach((task) => { el.taskList.appendChild(renderTaskRow(task)); });
+}
+
+async function refreshLibrary() {
+  const data = await api("/api/library");
+  state.libraryItems = data.items || [];
+  if (!el.library) return state.libraryItems;
+  el.library.innerHTML = "";
+  if (!state.libraryItems.length) { el.library.textContent = "还没有结果记录。"; return state.libraryItems; }
+  state.libraryItems.forEach((item) => {
+    state.jobMeta[item.job_id] = { ...(state.jobMeta[item.job_id] || {}), title: item.title, statusClass: item.status === "done" ? "done" : "" };
+    const row = document.createElement("div");
+    row.className = "library-item storage-result-item";
+    row.innerHTML = `<div><strong>${escapeHtml(item.title)}</strong><div class="small">${escapeHtml(item.created_at || "")} · ${formatClock(item.duration || 0)} · 候选 ${item.clip_count} · 已确认 ${item.confirmed_count} · 已导出 ${item.exported_count}</div><div class="small storage-path">结果文件夹：${escapeHtml(item.output_path || `outputs\\${item.output_folder || item.title || item.job_id}`)}</div></div><div class="library-actions"><button data-action="load" type="button">载入工作台</button><button data-action="open" type="button">打开文件夹</button></div>`;
+    row.querySelector("[data-action='load']")?.addEventListener("click", () => { ensureJobTab(item.job_id, item); switchView("workbench"); loadJob(item.job_id); });
+    row.querySelector("[data-action='open']")?.addEventListener("click", async () => { try { const result = await api("/api/dialog/open-path", { method: "POST", body: JSON.stringify({ job_id: item.job_id }) }); toast(`已打开结果文件夹：${result.folder}`); } catch (err) { toast(`打开文件夹失败：${err.message}`); } });
+    el.library.appendChild(row);
+  });
+  renderWorkbenchTabs();
+  return state.libraryItems;
+}
+
+el.navItems?.forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
+el.taskFilterActive?.addEventListener("click", () => { state.taskFilter = "active"; el.taskFilterActive.classList.add("active"); el.taskFilterCompleted.classList.remove("active"); refreshTasks(); });
+el.taskFilterCompleted?.addEventListener("click", () => { state.taskFilter = "completed"; el.taskFilterCompleted.classList.add("active"); el.taskFilterActive.classList.remove("active"); refreshTasks(); });
 
 async function boot() {
   startSafetyPolling();
@@ -1786,7 +2032,6 @@ async function boot() {
   await refreshSettings();
   syncTranscribeEngineUI();
   await refreshStorage();
-  initUpdater();
   const items = await refreshLibrary();
   if (!state.jobId && items && items.length) {
     await loadJob(items[0].job_id);

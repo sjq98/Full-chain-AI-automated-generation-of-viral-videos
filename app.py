@@ -43,14 +43,16 @@ else:
     BIN_DIR = ROOT / "bin"
 DATA_DIR = ROOT / "data"
 JOBS_DIR = DATA_DIR / "jobs"
+OUTPUTS_DIR = DATA_DIR / "outputs"
 RUNTIME_DIR = DATA_DIR / "runtime"
 SETTINGS_PATH = ROOT / "user-settings.json"
 TASKS_PATH = RUNTIME_DIR / "tasks.json"
 HOST = os.environ.get("HOST", "127.0.0.1")
-PORT = int(os.environ.get("PORT", "8767"))
+PORT = int(os.environ.get("PORT", "8789"))
 
 JOB_LOCK = threading.Lock()
 JOBS = {}
+UPLOAD_LOCK = threading.Lock()
 CLIP_TASK_LOCK = threading.Lock()
 CLIP_TASKS = {}
 TASK_PERSIST_LAST = 0.0
@@ -61,7 +63,7 @@ TASK_PERSIST_MIN_INTERVAL = 0.75
 
 
 def ensure_dirs():
-    for path in (STATIC_DIR, JOBS_DIR, RUNTIME_DIR):
+    for path in (STATIC_DIR, JOBS_DIR, OUTPUTS_DIR, RUNTIME_DIR):
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -111,9 +113,56 @@ def sanitize_name(name):
     return stem[:48] or "video"
 
 
+def sanitize_output_name(name):
+    """Keep a readable source-video name while making it safe for Windows folders."""
+    stem = Path(name).stem.strip() or "video"
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", stem).rstrip(". ")
+    return stem[:100] or "video"
+
+
+def suffixed_name(base_name, index):
+    """Append a readable duplicate suffix while keeping the Windows folder name valid."""
+    suffix = f"（{index}）"
+    return f"{base_name[: max(1, 100 - len(suffix))].rstrip('. ')}{suffix}"
+
+
+def unique_task_title(filename):
+    """Use one user-facing name for the task tab and its result folder."""
+    base_name = sanitize_output_name(filename)
+    used_names = set()
+    for path in JOBS_DIR.glob("*"):
+        if not path.is_dir():
+            continue
+        meta = read_json(path / "metadata.json", {})
+        for key in ("title", "output_title", "output_folder"):
+            value = str(meta.get(key) or "").strip()
+            if value:
+                used_names.add(value.casefold())
+    if OUTPUTS_DIR.exists():
+        used_names.update(path.name.casefold() for path in OUTPUTS_DIR.iterdir() if path.is_dir())
+
+    candidate = base_name
+    index = 1
+    while candidate.casefold() in used_names or (OUTPUTS_DIR / candidate).exists():
+        candidate = suffixed_name(base_name, index)
+        index += 1
+    return candidate
+
+
 def job_dir(job_id):
     safe = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff._-]", "", job_id)
     return JOBS_DIR / safe
+
+
+def resolve_relative_path(base_dir, relative_path):
+    """Resolve a request path only when it stays inside the allowed directory."""
+    base = base_dir.resolve()
+    try:
+        target = (base / Path(urllib.parse.unquote(str(relative_path)))).resolve()
+        target.relative_to(base)
+    except (OSError, ValueError):
+        return None
+    return target
 
 
 def seconds_to_clock(seconds):
@@ -127,6 +176,126 @@ def seconds_to_clock(seconds):
 def clip_filename(index, title, start, end):
     safe_title = sanitize_name(title)[:32]
     return f"{index:03d}_{safe_title}_{seconds_to_clock(start).replace(':', '-')}_to_{seconds_to_clock(end).replace(':', '-')}.mp4"
+
+
+def job_output_dir(job_id):
+    """Return the clean, user-facing result folder for one input video."""
+    base_dir = job_dir(job_id)
+    meta_path = base_dir / "metadata.json"
+    meta = read_json(meta_path, {})
+    folder_name = sanitize_output_name(meta.get("output_folder") or meta.get("output_title") or meta.get("title") or job_id)
+    if not meta.get("output_folder"):
+        candidate = folder_name
+        suffix = 1
+        while (OUTPUTS_DIR / folder_name).exists():
+            folder_name = suffixed_name(candidate, suffix)
+            suffix += 1
+        meta["output_folder"] = folder_name
+        write_json(meta_path, meta)
+    target = OUTPUTS_DIR / folder_name
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def clip_output_folder_name(clip):
+    start = seconds_to_clock(clip.get("start") or 0).replace(":", "-")
+    end = seconds_to_clock(clip.get("end") or 0).replace(":", "-")
+    return f"{start}_to_{end}"
+
+
+def clip_output_dir(job_id, clip, create=True):
+    target = job_output_dir(job_id) / clip_output_folder_name(clip)
+    if create:
+        target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def clip_analysis_markdown(clip):
+    title = str(clip.get("title") or clip.get("id") or "clip").strip()
+    start = seconds_to_clock(clip.get("start") or 0)
+    end = seconds_to_clock(clip.get("end") or 0)
+    duration = max(0.0, float(clip.get("end") or 0) - float(clip.get("start") or 0))
+    lines = [
+        f"# {title}",
+        "",
+        f"- \u65f6\u95f4\u8303\u56f4: {start} - {end}",
+        f"- \u65f6\u957f: {duration:.3f}\u79d2",
+    ]
+    if clip.get("clip_type"):
+        lines.append(f"- \u7247\u6bb5\u7c7b\u578b: {clip['clip_type']}")
+    if clip.get("confidence") not in {None, ""}:
+        lines.append(f"- \u7f6e\u4fe1\u5ea6: {clip['confidence']}")
+
+    score_names = [
+        ("quote_score", "\u91d1\u53e5\u5206"),
+        ("context_score", "\u4e0a\u4e0b\u6587\u5206"),
+        ("edit_score", "\u53ef\u526a\u8f91\u5206"),
+        ("viral_score", "\u4f20\u64ad\u5206"),
+        ("selection_score", "\u7efc\u5408\u5206"),
+    ]
+    scores = [f"{label} {clip[key]}" for key, label in score_names if clip.get(key) not in {None, ""}]
+    if scores:
+        lines.extend(["", "## \u8bc4\u5206", "", "- " + "\n- ".join(scores)])
+
+    sections = [
+        ("\u91d1\u53e5", "quote"),
+        ("\u5165\u9009\u539f\u56e0", "reason"),
+        ("\u5f00\u573a\u94a9\u5b50", "hook_text"),
+        ("\u5c01\u9762\u6587\u6848", "cover_text"),
+        ("\u526a\u8f91\u5efa\u8bae", "editor_note"),
+    ]
+    for heading, key in sections:
+        text = str(clip.get(key) or "").strip()
+        if text:
+            lines.extend(["", f"## {heading}", "", text])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_grouped_transcript_output(job_id):
+    base_dir = job_dir(job_id)
+    grouped = read_json(base_dir / "transcript_grouped.json", {"groups": []})
+    groups = grouped.get("groups", [])
+    lines = [
+        f"[{seconds_to_clock(group.get('start') or 0)} - {seconds_to_clock(group.get('end') or 0)}] {str(group.get('text') or '').strip()}"
+        for group in groups
+        if str(group.get("text") or "").strip()
+    ]
+    target = job_output_dir(job_id) / "transcript_grouped.md"
+    target.write_text("\n\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    return target
+
+
+def sync_job_output(job_id, include_clip_analysis=False, prune_clip_folders=False):
+    """Keep the user-facing folder limited to the grouped transcript and clip result folders."""
+    root = job_output_dir(job_id)
+    write_grouped_transcript_output(job_id)
+    if not include_clip_analysis:
+        return root
+
+    highlights = get_highlights(job_id)
+    clips = highlights.get("clips", [])
+    current_folders = {clip_output_folder_name(clip) for clip in clips}
+    if prune_clip_folders:
+        for child in root.iterdir():
+            if child.is_dir() and child.name not in current_folders:
+                shutil.rmtree(child, ignore_errors=True)
+    for clip in clips:
+        folder = clip_output_dir(job_id, clip)
+        (folder / "analysis.md").write_text(clip_analysis_markdown(clip), encoding="utf-8")
+    return root
+
+
+def remove_clip_output_folder(job_id, clip):
+    shutil.rmtree(clip_output_dir(job_id, clip, create=False), ignore_errors=True)
+
+
+def remove_clip_output_video(job_id, clip):
+    folder = clip_output_dir(job_id, clip, create=False)
+    if not folder.exists():
+        return
+    for path in folder.glob("clip.*"):
+        if path.is_file():
+            path.unlink()
 
 
 def bundled_binary(name):
@@ -446,12 +615,26 @@ def set_job(job_id, **updates):
     with JOB_LOCK:
         current = JOBS.setdefault(job_id, {})
         current["job_id"] = job_id
+        preview_stages = {"previewing", "preview_ready", "preview_error"}
+        incoming_stage = updates.get("stage")
+        if incoming_stage in preview_stages and current.get("stage") not in preview_stages:
+            updates = dict(updates)
+            updates["preview_stage"] = updates.pop("stage")
+            if "message" in updates:
+                updates["preview_message"] = updates.pop("message")
+            if "error" in updates:
+                updates["preview_error"] = updates.pop("error")
         current.update(updates)
         if current.get("transcribe_started_at"):
             current["transcribe_elapsed"] = max(0, time.time() - float(current["transcribe_started_at"]))
         current["updated_at"] = datetime.now().isoformat(timespec="seconds")
         write_json(RUNTIME_DIR / "active_job.json", current)
         return dict(current)
+
+
+def transcription_stop_requested(job_id, task_id=None):
+    state = get_job_state(job_id)
+    return bool(state.get("stop_requested") or clip_task_cancelled(task_id))
 
 
 def get_job_state(job_id):
@@ -665,6 +848,22 @@ def clip_task_cancelled(task_id):
         return bool(task and task.get("cancel_requested"))
 
 
+def clip_task_paused(task_id):
+    with CLIP_TASK_LOCK:
+        task = CLIP_TASKS.get(task_id)
+        return bool(task and task.get("pause_requested"))
+
+
+def wait_for_clip_task_resume(task_id):
+    """Pause only between request stages; an in-flight API request cannot be paused."""
+    while clip_task_paused(task_id):
+        wait_for_clip_task_resume(task_id)
+        set_clip_task(task_id, status="paused", message="DeepSeek analysis paused")
+        time.sleep(0.25)
+    if clip_task_cancelled(task_id):
+        raise RuntimeError("Analysis task cancelled")
+
+
 def clip_task_set_process(task_id, proc):
     with CLIP_TASK_LOCK:
         task = CLIP_TASKS.get(task_id)
@@ -784,10 +983,7 @@ def save_transcript_files(base_dir, segments):
     write_json(base_dir / "transcript.json", transcript_json)
     groups = group_transcript_segments(segments)
     write_json(base_dir / "transcript_grouped.json", {"language": "zh", "groups": groups})
-    lines = [f"[{seconds_to_clock(s['start'])} - {seconds_to_clock(s['end'])}] {s['text']}" for s in segments]
-    (base_dir / "transcript.md").write_text("\n".join(lines), encoding="utf-8")
-    grouped_lines = [f"[{seconds_to_clock(g['start'])} - {seconds_to_clock(g['end'])}] {g['text']}" for g in groups]
-    (base_dir / "transcript_grouped.md").write_text("\n\n".join(grouped_lines), encoding="utf-8")
+    write_grouped_transcript_output(base_dir.name)
 
 
 def volcengine_settings(payload=None):
@@ -951,6 +1147,8 @@ def volcengine_transcribe_worker(job_id, task_id=None, volc_payload=None):
         set_job(job_id, stage="extracting", message="正在提取音频，准备提交火山 BigModel 识别", progress=0.05, transcribe_started_at=started)
         update_task(status="running", progress=0.03, message="正在提取本地音频", encoder="火山 BigModel ASR")
         run_process([ffmpeg_path(), "-y", "-i", str(source), "-vn", "-ac", "1", "-ar", "16000", str(audio)])
+        if transcription_stop_requested(job_id, task_id):
+            raise RuntimeError("transcription stopped")
         if not audio.exists() or audio.stat().st_size == 0:
             raise RuntimeError("音频提取失败：audio.wav 没有生成。")
 
@@ -961,9 +1159,13 @@ def volcengine_transcribe_worker(job_id, task_id=None, volc_payload=None):
             update_task(status="running", progress=0.10, message="正在上传 audio.wav 到 TOS", encoder="TOS + 火山 BigModel ASR")
             tos_upload = tos_upload_audio(audio, job_id, tos_cfg)
             audio_url = tos_upload["audio_url"]
+            if transcription_stop_requested(job_id, task_id):
+                raise RuntimeError("transcription stopped")
             write_json(base_dir / "tos_audio_upload.json", {**tos_upload, "uploaded_at": datetime.now().isoformat(timespec="seconds")})
 
         request_id = str(uuid4())
+        if transcription_stop_requested(job_id, task_id):
+            raise RuntimeError("transcription stopped")
         submit_body = {
             "user": {"uid": "mp4-golden-workbench"},
             "audio": {"url": audio_url, "format": "wav", "codec": "raw", "rate": 16000, "bits": 16, "channel": 1},
@@ -1022,9 +1224,10 @@ def volcengine_transcribe_worker(job_id, task_id=None, volc_payload=None):
         segments = volcengine_extract_segments(result_body)
         if len(segments) == 1 and segments[0].get("end", 0) <= segments[0].get("start", 0) and meta.get("duration"):
             segments[0]["end"] = round(float(meta.get("duration") or 0), 3)
-        transcript = {"segments": segments, "engine": "volcengine_bigmodel", "volcengine_task_id": request_id}
+        save_transcript_files(base_dir, segments)
+        transcript = read_json(base_dir / "transcript.json", {"segments": segments})
+        transcript.update({"engine": "volcengine_bigmodel", "volcengine_task_id": request_id})
         write_json(base_dir / "transcript.json", transcript)
-        write_json(base_dir / "transcript_grouped.json", {"groups": group_transcript_segments(segments)})
         write_json(base_dir / "volcengine_asr_result.json", query_result or {})
 
         meta["status"] = "transcribed"
@@ -1034,6 +1237,11 @@ def volcengine_transcribe_worker(job_id, task_id=None, volc_payload=None):
         set_job(job_id, stage="transcribed", message=final_message, progress=1, segment_count=len(segments), transcribe_elapsed=max(0, time.time() - started), transcript_tail=segments[-8:] if segments else [])
         update_task(status="done", progress=1, remaining=0, message=final_message, segment_count=len(segments), transcript_file="transcript.json")
     except Exception as exc:
+        if transcription_stop_requested(job_id, task_id):
+            message = "转写已结束；未提交的火山请求已停止。已提交的云端任务可能仍在处理。"
+            set_job(job_id, stage="stopped", message=message, error=None, transcribe_elapsed=max(0, time.time() - started))
+            update_task(status="cancelled", progress=0, remaining=0, message=message, error=None)
+            return
         set_job(job_id, stage="error", message=str(exc), error=str(exc), transcribe_elapsed=max(0, time.time() - started))
         update_task(status="error", progress=0, remaining=0, message=str(exc), error=str(exc))
 
@@ -1042,7 +1250,7 @@ def transcribe_worker(job_id, task_id=None, payload=None):
     payload = payload or {}
     return volcengine_transcribe_worker(job_id, task_id, payload)
 
-def deepseek_analyze(job_id, payload):
+def deepseek_analyze(job_id, payload, task_id=None):
     base_dir = job_dir(job_id)
     grouped = read_json(base_dir / "transcript_grouped.json", {})
     raw = read_json(base_dir / "transcript.json", {})
@@ -1069,7 +1277,9 @@ def deepseek_analyze(job_id, payload):
     if not key:
         raise RuntimeError("Please enter a DeepSeek API Key first")
     if payload.get("save_key"):
-        write_json(SETTINGS_PATH, {"deepseek_api_key": key})
+        saved = read_json(SETTINGS_PATH, {})
+        saved["deepseek_api_key"] = key
+        write_json(SETTINGS_PATH, saved)
 
     target_count = int(payload.get("target_clip_count") or 20)
     min_seconds = int(payload.get("min_seconds") or 8)
@@ -1172,10 +1382,11 @@ Transcript:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"DeepSeek request failed: {exc.code} {detail}")
 
+    if task_id:
+        wait_for_clip_task_resume(task_id)
     content = result["choices"][0]["message"]["content"].strip()
     if content.startswith("```"):
         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.S).strip()
-    (base_dir / "analysis.raw.txt").write_text(content, encoding="utf-8")
     highlights = json.loads(content)
     candidates = []
     duration = float(meta.get("duration") or 0)
@@ -1286,11 +1497,6 @@ Transcript:
         clips.append(clip)
     highlights = {"clips": clips, "candidate_count": len(candidates), "requested_count": target_count}
     save_highlights(job_id, highlights)
-    md = "\n\n".join(
-        f"## {i}. {c.get('title', c['id'])}\n\n- Time: {seconds_to_clock(c['start'])} - {seconds_to_clock(c['end'])}\n- Quote: {c.get('quote', '')}\n- Reason: {c.get('reason', '')}"
-        for i, c in enumerate(clips, start=1)
-    )
-    (base_dir / "analysis.md").write_text(md, encoding="utf-8")
     return highlights
 
 
@@ -1302,10 +1508,9 @@ def analyze_worker(task_id, job_id, payload):
         unit_count = len(grouped.get("groups", [])) or len(raw.get("segments", []))
         set_clip_task(task_id, status="running", progress=0.05, elapsed=0, message=f"\u6b63\u5728\u6574\u7406\u6587\u5b57\u7a3f\u4e0a\u4e0b\u6587\uff08{unit_count} \u4e2a\u5355\u5143\uff09", encoder="DeepSeek")
         set_job(job_id, stage="analyzing", message="DeepSeek \u5206\u6790\u5df2\u5f00\u59cb", analyze_task_id=task_id)
-        if clip_task_cancelled(task_id):
-            raise RuntimeError("Analysis task cancelled")
+        wait_for_clip_task_resume(task_id)
         set_clip_task(task_id, status="running", progress=0.20, elapsed=max(0, time.time() - started), message="\u5df2\u53d1\u9001\u7ed9 DeepSeek\uff0cAI \u6b63\u5728\u5206\u6790\uff08\u901a\u5e38\u9700\u8981 30-90 \u79d2\uff0c\u8bf7\u8010\u5fc3\u7b49\u5f85\uff09")
-        highlights = deepseek_analyze(job_id, payload)
+        highlights = deepseek_analyze(job_id, payload, task_id)
         if clip_task_cancelled(task_id):
             raise RuntimeError("Analysis task cancelled")
         set_clip_task(task_id, status="running", progress=0.90, elapsed=max(0, time.time() - started), message="AI \u5df2\u8fd4\u56de\u7ed3\u679c\uff0c\u6b63\u5728\u8fc7\u6ee4\u3001\u53bb\u91cd\u3001\u6392\u5e8f")
@@ -1360,6 +1565,7 @@ def get_highlights(job_id):
 def save_highlights(job_id, highlights):
     highlights, _changed = normalize_highlights(highlights)
     write_json(job_dir(job_id) / "highlights.json", highlights)
+    sync_job_output(job_id, include_clip_analysis=True, prune_clip_folders=True)
 
 
 def clip_export_filename(index, title, start, end, source_path):
@@ -1409,16 +1615,23 @@ def render_clip(job_id, clip_id, export=False, precise=False, export_dir=None, p
     if end <= start:
         raise RuntimeError("\u7247\u6bb5\u7ed3\u675f\u65f6\u95f4\u5fc5\u987b\u665a\u4e8e\u5f00\u59cb\u65f6\u95f4")
 
-    if export and export_dir:
-        folder = Path(str(export_dir)).expanduser()
+    if export:
+        if export_dir:
+            output_name = read_json(base_dir / "metadata.json", {}).get("output_folder") or job_output_dir(job_id).name
+            folder = Path(str(export_dir)).expanduser() / output_name / clip_output_folder_name(clip)
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "analysis.md").write_text(clip_analysis_markdown(clip), encoding="utf-8")
+        else:
+            folder = clip_output_dir(job_id, clip)
     else:
-        folder = base_dir / "clips" / ("exports" if export else "preview")
+        folder = base_dir / "clips" / "preview"
     folder.mkdir(parents=True, exist_ok=True)
     index = clips.index(clip) + 1
 
     if export:
         # Final clips preserve the original video/audio streams. No re-encoding.
-        name = clip_export_filename(index, clip.get("title") or clip_id, start, end, source)
+        ext = source.suffix.lower() if source.suffix.lower() in {".mp4", ".mov"} else ".mp4"
+        name = f"clip{ext}"
         target = folder / name
         cmd = [
             ffmpeg_path(),
@@ -1631,10 +1844,13 @@ def list_library():
             continue
         highlights = read_json(path / "highlights.json", {"clips": []})
         clips = highlights.get("clips", [])
+        output_dir = job_output_dir(path.name)
         items.append(
             {
                 "job_id": path.name,
                 "title": meta.get("title", path.name),
+                "output_folder": output_dir.name,
+                "output_path": str(output_dir),
                 "created_at": meta.get("created_at"),
                 "duration": meta.get("duration"),
                 "status": meta.get("status"),
@@ -1658,6 +1874,10 @@ def clear_library():
             if path.is_dir():
                 shutil.rmtree(path, ignore_errors=True)
                 removed += 1
+    if OUTPUTS_DIR.exists():
+        for path in list(OUTPUTS_DIR.glob("*")):
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
     return {"removed": removed}
 
 
@@ -1673,7 +1893,11 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/":
             self.serve_file(STATIC_DIR / "index.html")
         elif path.startswith("/static/"):
-            self.serve_file(STATIC_DIR / path.removeprefix("/static/"))
+            static_path = resolve_relative_path(STATIC_DIR, path.removeprefix("/static/"))
+            if not static_path:
+                self.send_error(403)
+                return
+            self.serve_file(static_path)
         elif path.startswith("/media/"):
             self.serve_media(path.removeprefix("/media/"))
         elif path == "/api/job/status":
@@ -1708,12 +1932,19 @@ class Handler(SimpleHTTPRequestHandler):
             job_id = query.get("job_id", [""])[0]
             base_dir = job_dir(job_id)
             meta = normalize_browser_preview_meta(base_dir, read_json(base_dir / "metadata.json", {}))
+            output_dir = sync_job_output(job_id, include_clip_analysis=True)
             json_response(
                 self,
                 {
                     "ok": True,
                     "metadata": meta,
                     "transcript": read_json(base_dir / "transcript.json", {"segments": []}),
+                    "transcript_grouped": read_json(base_dir / "transcript_grouped.json", {"groups": []}),
+                    "transcript_files": {
+                        "folder": str(output_dir),
+                        "markdown": str(output_dir / "transcript_grouped.md"),
+                        "grouped_markdown": str(output_dir / "transcript_grouped.md"),
+                    },
                     "highlights": read_json(base_dir / "highlights.json", {"clips": []}),
                 },
             )
@@ -1783,6 +2014,12 @@ class Handler(SimpleHTTPRequestHandler):
                     self.handle_export(payload)
                 elif path == "/api/dialog/export-dir":
                     self.handle_pick_export_dir(payload)
+                elif path == "/api/dialog/open-path":
+                    self.handle_open_path(payload)
+                elif path == "/api/dialog/save-transcript":
+                    self.handle_save_transcript(payload)
+                elif path == "/api/tasks/control":
+                    self.handle_task_control(payload)
                 elif path == "/api/storage/cleanup":
                     json_response(self, {"ok": True, **cleanup_storage(payload)})
                 elif path == "/api/tasks/clear-finished":
@@ -1848,12 +2085,8 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
     def serve_media(self, relative):
-        parts = Path(urllib.parse.unquote(relative)).parts
-        if not parts:
-            self.send_error(404)
-            return
-        path = (JOBS_DIR / Path(*parts)).resolve()
-        if not str(path).startswith(str(JOBS_DIR.resolve())):
+        path = resolve_relative_path(JOBS_DIR, relative)
+        if not path:
             self.send_error(403)
             return
         self.serve_file(path)
@@ -1868,23 +2101,28 @@ class Handler(SimpleHTTPRequestHandler):
         if ext not in {".mp4", ".mov"}:
             error_response(self, "MVP 版支持 MP4 / MOV 文件", 400)
             return
-        title = sanitize_name(item.filename)
-        job_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + title
-        base_dir = job_dir(job_id)
-        base_dir.mkdir(parents=True, exist_ok=True)
-        source = base_dir / f"source{ext}"
-        with source.open("wb") as f:
-            shutil.copyfileobj(item.file, f)
-        meta = {
-            "job_id": job_id,
-            "title": title,
-            "original_file": f"source{ext}",
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-            "source_size": source.stat().st_size,
-            "status": "uploaded",
-        }
-        meta.update(probe_video(source))
-        write_json(base_dir / "metadata.json", meta)
+        with UPLOAD_LOCK:
+            task_title = unique_task_title(item.filename)
+            job_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{sanitize_name(task_title)}-{uuid4().hex[:8]}"
+            base_dir = job_dir(job_id)
+            base_dir.mkdir(parents=True, exist_ok=False)
+            source = base_dir / f"source{ext}"
+            with source.open("wb") as f:
+                shutil.copyfileobj(item.file, f)
+            meta = {
+                "job_id": job_id,
+                "title": task_title,
+                "output_title": task_title,
+                "output_folder": task_title,
+                "source_filename": item.filename,
+                "original_file": f"source{ext}",
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "source_size": source.stat().st_size,
+                "status": "uploaded",
+            }
+            meta.update(probe_video(source))
+            write_json(base_dir / "metadata.json", meta)
+            job_output_dir(job_id)
         preview_queued = should_make_browser_preview(ext, meta)
         message = "\u6e90\u89c6\u9891\u5df2\u4fdd\u5b58\uff0c\u6b63\u5728\u751f\u6210\u6d4f\u89c8\u5668\u517c\u5bb9\u9884\u89c8" if preview_queued else "\u6e90\u89c6\u9891\u5df2\u4fdd\u5b58\uff0c\u53ef\u5f00\u59cb\u8f6c\u5199"
         set_job(job_id, stage="uploaded", message=message, metadata=meta, progress=0)
@@ -1964,7 +2202,7 @@ class Handler(SimpleHTTPRequestHandler):
             if task_id:
                 set_clip_task(task_id, status="running", message="继续转写")
         elif action == "stop":
-            job = set_job(job_id, stop_requested=True, message="收到结束请求")
+            job = set_job(job_id, stop_requested=True, stage="stopped", message="收到结束请求，正在停止本地转写流程")
             if task_id:
                 set_clip_task(task_id, cancel_requested=True, message="正在结束转写，保留已生成文字稿")
         else:
@@ -1979,7 +2217,9 @@ class Handler(SimpleHTTPRequestHandler):
         if not key:
             raise RuntimeError("Please enter a DeepSeek API Key first")
         if payload.get("save_key") and key:
-            write_json(SETTINGS_PATH, {"deepseek_api_key": key})
+            saved = read_json(SETTINGS_PATH, {})
+            saved["deepseek_api_key"] = key
+            write_json(SETTINGS_PATH, saved)
         params = {
             "job_id": job_id,
             "target_clip_count": int(payload.get("target_clip_count") or 20),
@@ -1993,6 +2233,34 @@ class Handler(SimpleHTTPRequestHandler):
         task = set_clip_task(task_id, params=params, encoder="DeepSeek", message="\u5206\u6790\u4efb\u52a1\u5df2\u52a0\u5165\u961f\u5217")
         set_job(job_id, stage="analyzing", message="\u5206\u6790\u4efb\u52a1\u5df2\u52a0\u5165\u961f\u5217", analyze_task_id=task_id)
         threading.Thread(target=analyze_worker, args=(task_id, job_id, runtime_payload), daemon=True).start()
+        json_response(self, {"ok": True, "task": task})
+
+    def handle_task_control(self, payload):
+        task_id = payload.get("task_id")
+        action = payload.get("action")
+        with CLIP_TASK_LOCK:
+            task = CLIP_TASKS.get(task_id)
+            if not task:
+                raise RuntimeError("Task record not found")
+            if task.get("type") != "analyze":
+                raise RuntimeError("This control is only available for DeepSeek analysis")
+            if task.get("status") not in {"queued", "running", "paused"}:
+                raise RuntimeError("Analysis task is no longer active")
+            if action == "pause":
+                task["pause_requested"] = True
+            elif action == "resume":
+                task["pause_requested"] = False
+            elif action == "stop":
+                task["cancel_requested"] = True
+                task["pause_requested"] = False
+            else:
+                raise RuntimeError("Unknown task control action")
+        if action == "pause":
+            task = set_clip_task(task_id, status="paused", message="Pause requested; any in-flight DeepSeek response will wait before it is saved")
+        elif action == "resume":
+            task = set_clip_task(task_id, status="running", message="DeepSeek analysis resumed")
+        else:
+            task = set_clip_task(task_id, message="Stopping DeepSeek analysis; any in-flight response will be discarded")
         json_response(self, {"ok": True, "task": task})
 
     def handle_save_settings(self, payload):
@@ -2092,13 +2360,21 @@ class Handler(SimpleHTTPRequestHandler):
         clip = next((c for c in highlights.get("clips", []) if c.get("id") == clip_id), None)
         if not clip:
             raise RuntimeError("片段不存在")
+        remove_clip_output_folder(job_id, clip)
         clip.setdefault("original_start", clip.get("start"))
         clip.setdefault("original_end", clip.get("end"))
         clip["start"] = round(float(payload.get("start")), 3)
         clip["end"] = round(float(payload.get("end")), 3)
         clip["status"] = "needs_render"
         clip["preview_file"] = None
+        clip["export_file"] = None
+        clip["export_path"] = None
+        clip["export_quality"] = None
+        clip["export_verification"] = None
         save_highlights(job_id, highlights)
+        # Keep the new time-range folder's analysis available immediately.
+        # The final video remains absent until the user explicitly exports it.
+        sync_job_output(job_id, include_clip_analysis=True, prune_clip_folders=True)
         json_response(self, {"ok": True, "clip": clip})
 
     def handle_manual_clip(self, payload):
@@ -2181,16 +2457,22 @@ class Handler(SimpleHTTPRequestHandler):
             json_response(self, {"ok": True, "highlights": highlights})
             return
         if action == "reset_time":
+            remove_clip_output_folder(job_id, clip)
             clip["start"] = round(float(clip.get("original_start", clip.get("start", 0))), 3)
             clip["end"] = round(float(clip.get("original_end", clip.get("end", 0))), 3)
             clip["status"] = "needs_render"
             clip["preview_file"] = None
+            clip["export_file"] = None
+            clip["export_path"] = None
+            clip["export_quality"] = None
+            clip["export_verification"] = None
         elif action == "clear_preview":
             remove_job_relative_file(base_dir, clip.get("preview_file"))
             clip["preview_file"] = None
             if clip.get("status") == "ready":
                 clip["status"] = "needs_render"
         elif action == "clear_export":
+            remove_clip_output_video(job_id, clip)
             clip["export_file"] = None
             clip["export_path"] = None
             clip["export_quality"] = None
@@ -2219,6 +2501,54 @@ class Handler(SimpleHTTPRequestHandler):
             json_response(self, {"ok": True, "selected": True, "path": selected})
         except Exception as exc:
             json_response(self, {"ok": False, "error": f"无法打开文件夹选择窗口：{exc}"}, 500)
+    def handle_open_path(self, payload):
+        job_id = payload.get("job_id")
+        if not job_id:
+            raise RuntimeError("Missing job_id")
+        base_dir = job_dir(job_id)
+        output_dir = job_output_dir(job_id)
+        if not output_dir.exists():
+            raise RuntimeError("Task folder not found")
+        if os.name == "nt":
+            os.startfile(str(output_dir))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(output_dir)])
+        else:
+            subprocess.Popen(["xdg-open", str(output_dir)])
+        json_response(self, {"ok": True, "folder": str(output_dir)})
+
+    def handle_save_transcript(self, payload):
+        job_id = payload.get("job_id")
+        if not job_id:
+            raise RuntimeError("Missing job_id")
+        source = job_output_dir(job_id) / "transcript_grouped.md"
+        if not source.exists():
+            base_dir = job_dir(job_id)
+            transcript = read_json(base_dir / "transcript.json", {"segments": []})
+            save_transcript_files(base_dir, transcript.get("segments", []))
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            target = filedialog.asksaveasfilename(
+                title="Save transcript",
+                initialfile="transcript_grouped.md",
+                defaultextension=".md",
+                filetypes=[("Markdown transcript", "*.md"), ("Text file", "*.txt")],
+            )
+            root.destroy()
+        except Exception as exc:
+            raise RuntimeError(f"Unable to open save dialog: {exc}")
+        if not target:
+            json_response(self, {"ok": True, "saved": False, "path": ""})
+            return
+        target_path = Path(target)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target_path)
+        json_response(self, {"ok": True, "saved": True, "path": str(target_path)})
+
     def handle_export(self, payload):
         job_id = payload.get("job_id")
         clip_ids = payload.get("clip_ids") or []

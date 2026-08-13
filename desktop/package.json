@@ -1,8 +1,8 @@
 {
   "name": "mp4-golden-clip-workbench",
-  "productName": "MP4金句片段工作台",
-  "version": "1.0.5",
-  "description": "MP4 金句片段筛选导出工作台：上传视频、火山引擎转写、DeepSeek 选金句、预览微调、原画质导出",
+  "productName": "MP4 Golden Clip Workbench",
+  "version": "1.0.8",
+  "description": "Local video transcription, DeepSeek highlight analysis, preview, and original-quality clip export.",
   "main": "main.js",
   "author": "Neko-2077",
   "license": "MIT",
@@ -10,19 +10,15 @@
     "start": "electron .",
     "dist": "electron-builder --win nsis",
     "dist:portable": "electron-builder --win portable",
-    "publish": "electron-builder --win nsis --publish always",
     "dist:mac": "electron-builder --mac dmg zip --publish never"
   },
   "devDependencies": {
     "electron": "^33.0.0",
     "electron-builder": "^25.1.8"
   },
-  "dependencies": {
-    "electron-updater": "^6.3.9"
-  },
   "build": {
     "appId": "com.neko.mp4goldenclip",
-    "productName": "MP4金句片段工作台",
+    "productName": "MP4 Golden Clip Workbench",
     "files": [
       "main.js",
       "preload.js",
@@ -38,6 +34,7 @@
       }
     ],
     "win": {
+      "signAndEditExecutable": false,
       "target": [
         {
           "target": "nsis",
@@ -46,23 +43,15 @@
           ]
         }
       ],
-      "icon": "resources/icon.ico",
-      "artifactName": "mp4-golden-clip-workbench-setup-${version}.${ext}"
+      "artifactName": "MP4-Golden-Clip-Workbench-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "MP4金句片段工作台"
+      "shortcutName": "MP4 Golden Clip Workbench"
     },
-    "publish": [
-      {
-        "provider": "github",
-        "owner": "Neko-2077",
-        "repo": "mp4-golden-clip-workbench"
-      }
-    ],
     "mac": {
       "target": [
         {

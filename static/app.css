@@ -807,34 +807,67 @@ input[type="range"] {
   padding: 10px 2px;
 }
 
-/* ===== updater (Electron) ===== */
-.updater {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+/* App shell and icon-first navigation */
+body { background: #f3f5f8; }
+.app-shell { min-height: 100vh; display: grid; grid-template-columns: 86px minmax(0, 1fr); }
+.sidebar { position: sticky; top: 0; height: 100vh; z-index: 10; background: #273143; color: #dce4ef; display: flex; flex-direction: column; align-items: center; box-shadow: 1px 0 0 rgba(15, 23, 42, .18); }
+.brand-lockup { width: 86px; height: 86px; display: grid; place-items: center; border-bottom: 1px solid rgba(255,255,255,.1); }
+.brand-mark { width: 43px; height: 43px; display: grid; place-items: center; border: 2px solid #fff; border-radius: 50%; color: #fff; font-size: 13px; font-weight: 800; letter-spacing: .5px; transform: rotate(-9deg); }
+.app-nav { width: 100%; display: grid; gap: 11px; padding: 18px 12px; }
+.nav-item { position: relative; width: 62px; height: 60px; min-height: 60px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 7px; background: transparent; color: #c7d1df; }
+.nav-item:hover:not(:disabled) { background: #344157; color: #fff; }
+.nav-item.active { background: #fff; color: #1777ee; box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+.nav-icon { width: auto; color: currentColor; text-align: center; font-size: 29px; line-height: 1; font-family: "Segoe UI Symbol", "Microsoft YaHei", sans-serif; }
+.nav-item[data-tooltip]::after { content: attr(data-tooltip); position: absolute; left: 76px; top: 50%; z-index: 30; transform: translateY(-50%); padding: 7px 10px; border-radius: 5px; background: #1f2937; color: #fff; font-size: 12px; white-space: nowrap; opacity: 0; pointer-events: none; box-shadow: 0 4px 12px rgba(15,23,42,.2); transition: opacity .16s ease; }
+.nav-item[data-tooltip]:hover::after { opacity: 1; }
+.nav-count { position: absolute; right: 7px; top: 6px; min-width: 18px; padding: 1px 5px; border: 2px solid #273143; border-radius: 12px; background: #f04438; color: #fff; font-size: 10px; line-height: 16px; text-align: center; }
+.sidebar-footer, .status-dot { display: none; }
+.app-main { min-width: 0; padding: 0 26px 42px; }
+.app-main > .topbar { max-width: 1500px; min-height: 88px; margin: 0 auto 18px; padding: 0 2px; border-bottom: 1px solid #e1e6ed; }
+.app-view { max-width: 1500px; margin: 0 auto; }
+.app-view[hidden] { display: none; }
+.workbench-topline { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.workbench-tabs { min-width: 0; flex: 1; display: flex; align-items: stretch; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+.workbench-tab { min-width: 150px; max-width: 240px; min-height: 40px; display: flex; align-items: center; gap: 7px; padding: 0 10px; border-radius: 5px; background: #e8edf3; border-color: #d9e0e9; color: #536276; }
+.workbench-tab.active { background: #fff; border-color: #9fc0f7; color: var(--ink); box-shadow: 0 2px 7px rgba(30,55,90,.08); }
+.tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; text-align: left; }
+.tab-close { color: #8a98a9; font-size: 18px; line-height: 1; }
+.tab-status { width: 7px; height: 7px; border-radius: 50%; background: #aab5c4; flex: 0 0 auto; }
+.tab-status.done { background: #22a06b; }
+.tabs-empty { color: var(--muted); font-size: 13px; padding: 10px 2px; }
+.compact-file-button,
+.compact-action-button { min-height: 40px; white-space: nowrap; }
+.compact-action-button { background: #fff; }
+.panel-subtitle { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; font-weight: 400; }
+.panel-head-actions, .library-actions { display: flex; align-items: center; gap: 8px; }
+.tool-button-group { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.tool-button-group button { min-height: 30px; padding: 0 9px; font-size: 12px; }
+.page-panel { padding: 20px; }
+.page-panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
+.page-panel-head h2 { margin: 0; }
+.page-panel-head p, .destructive-panel p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+.task-center-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.segmented-control { display: inline-flex; padding: 3px; background: #edf1f6; border-radius: 7px; }
+.segmented-control button { min-height: 32px; padding: 0 14px; border: 0; background: transparent; color: var(--muted); }
+.segmented-control button.active { background: #fff; color: var(--accent); box-shadow: 0 1px 4px rgba(30,55,90,.12); }
+.storage-results { gap: 10px; }
+.storage-result-item { padding: 14px; grid-template-columns: minmax(0,1fr) auto; }
+.storage-path { margin-top: 7px; color: #64748b; }
+.storage-maintenance { margin-top: 16px; }
+.destructive-panel { margin-top: 16px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-color: #efd2d0; background: #fffafa; }
+
+@media (max-width: 960px) {
+  .app-shell { grid-template-columns: 76px minmax(0, 1fr); }
+  .sidebar, .brand-lockup { width: 76px; }
+  .nav-item { width: 52px; }
+  .nav-icon { font-size: 25px; }
+  .app-main { padding: 22px 16px 34px; }
 }
-.updater-version {
-  font-size: 13px;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-  background: var(--soft);
-  border: 1px solid var(--line);
-  padding: 2px 8px;
-  border-radius: 10px;
-}
-.updater-status {
-  font-size: 13px;
-  color: var(--muted);
-  max-width: 320px;
-}
-.updater-progress-wrap {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 200px;
-}
-.updater-progress-wrap .progress-bar {
-  flex: 1;
-  min-width: 120px;
+@media (max-width: 720px) {
+  .page-panel-head, .destructive-panel { flex-direction: column; align-items: stretch; }
+  .workbench-topline { align-items: stretch; flex-direction: column; }
+  .compact-file-button,
+  .compact-action-button { align-self: flex-start; }
+  .storage-result-item { grid-template-columns: 1fr; }
+  .library-actions { justify-content: flex-start; }
 }

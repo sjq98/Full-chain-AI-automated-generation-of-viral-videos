@@ -27,6 +27,15 @@ bin/ffprobe.exe
 
 # === 系统 ===
 .DS_Store
+build/
+dist/
+desktop/dist/
+desktop/resources/backend/
+desktop/sfx/workbench.zip
+desktop/sfx/portable.sed
+desktop/sfx/
+release/
+desktop_launcher.spec
 Thumbs.db
 desktop/resources/backend/
 desktop/resources/icon.ico

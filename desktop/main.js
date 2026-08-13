@@ -1,5 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require("electron");
-const { autoUpdater } = require("electron-updater");
+const { app, BrowserWindow, dialog } = require("electron");
 const { spawn } = require("child_process");
 const http = require("http");
 const path = require("path");
@@ -137,112 +136,9 @@ function createWindow() {
   });
 }
 
-// ===================== 自动更新 =====================
-
-let updateState = {
-  checking: false,
-  available: null, // { version, releaseDate, releaseNotes }
-  downloading: false,
-  progress: 0, // 0-100
-  downloaded: false,
-  error: null,
-};
-
-function sendUpdateStatus() {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send("update-status", { ...updateState });
-  }
-}
-
-function setupAutoUpdater() {
-  autoUpdater.autoDownload = false; // 由前端发起下载
-  autoUpdater.autoInstallOnAppQuit = true;
-
-  autoUpdater.on("checking-for-update", () => {
-    updateState.checking = true;
-    updateState.error = null;
-    sendUpdateStatus();
-  });
-  autoUpdater.on("update-available", (info) => {
-    updateState.checking = false;
-    updateState.available = {
-      version: info.version,
-      releaseDate: info.releaseDate,
-      releaseNotes: info.releaseNotes ? String(info.releaseNotes).slice(0, 2000) : "",
-    };
-    sendUpdateStatus();
-  });
-  autoUpdater.on("update-not-available", () => {
-    updateState.checking = false;
-    sendUpdateStatus();
-  });
-  autoUpdater.on("download-progress", (progress) => {
-    updateState.downloading = true;
-    updateState.progress = Math.round(progress.percent || 0);
-    updateState.bytesPerSecond = progress.bytesPerSecond;
-    updateState.transferred = progress.transferred;
-    updateState.total = progress.total;
-    sendUpdateStatus();
-  });
-  autoUpdater.on("update-downloaded", () => {
-    updateState.downloading = false;
-    updateState.downloaded = true;
-    updateState.progress = 100;
-    sendUpdateStatus();
-  });
-  autoUpdater.on("error", (err) => {
-    updateState.checking = false;
-    updateState.downloading = false;
-    updateState.error = String(err && err.message ? err.message : err);
-    sendUpdateStatus();
-  });
-}
-
-function checkForUpdates(manual = true) {
-  if (updateState.checking) return Promise.resolve({ ...updateState });
-  try {
-    if (manual) {
-      updateState.error = null;
-    }
-    autoUpdater.checkForUpdates();
-  } catch (err) {
-    updateState.error = String(err && err.message ? err.message : err);
-    sendUpdateStatus();
-  }
-  return Promise.resolve({ ...updateState });
-}
-
-async function downloadUpdate() {
-  try {
-    await autoUpdater.downloadUpdate();
-  } catch (err) {
-    updateState.error = String(err && err.message ? err.message : err);
-    sendUpdateStatus();
-  }
-}
-
-async function installUpdate() {
-  try {
-    autoUpdater.quitAndInstall(false, true);
-  } catch (err) {
-    updateState.error = String(err && err.message ? err.message : err);
-    sendUpdateStatus();
-  }
-}
-
-// ===================== IPC =====================
-
-ipcMain.handle("app:version", () => app.getVersion());
-ipcMain.handle("app:platform", () => process.platform);
-ipcMain.handle("app:update-check", (_e, manual = true) => checkForUpdates(manual));
-ipcMain.handle("app:update-download", () => downloadUpdate());
-ipcMain.handle("app:update-install", () => installUpdate());
-ipcMain.handle("app:update-state", () => ({ ...updateState }));
-
 // ===================== 生命周期 =====================
 
 app.whenReady().then(async () => {
-  setupAutoUpdater();
   try {
     await startBackend();
   } catch (err) {
@@ -251,17 +147,6 @@ app.whenReady().then(async () => {
     return;
   }
   createWindow();
-
-  // 打开软件后延迟数秒自动检查更新（生产环境才检查）
-  if (isPackaged()) {
-    setTimeout(() => {
-      try {
-        autoUpdater.checkForUpdates();
-      } catch (_) {
-        /* ignore */
-      }
-    }, 8000);
-  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
