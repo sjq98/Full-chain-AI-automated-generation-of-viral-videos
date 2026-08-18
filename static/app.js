@@ -15,6 +15,8 @@ const state = {
   analyzeTaskId: null,
   openJobIds: [],
   draftTabs: [],
+  draftMedia: {},
+  activeDraftId: null,
   draftSequence: 0,
   jobMeta: {},
   libraryItems: [],
@@ -30,6 +32,8 @@ const state = {
   transcribeControlPending: false,
   providerKind: "llm",
   providers: { llm: [], volcengine: [] },
+  providersPackaged: false,
+  providerSettingsInitialized: true,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -699,6 +703,51 @@ function needsBrowserPreview(meta) {
   return !meta.browser_preview_file;
 }
 
+function cacheActiveDraftMedia() {
+  const draftId = state.activeDraftId;
+  if (!draftId || (!state.localFile && !state.localUrl)) return;
+  const previous = state.draftMedia[draftId] || {};
+  const start = parseClock(el.trimStartInput?.value || previous.trimStart || 0);
+  const end = parseClock(el.trimEndInput?.value || previous.trimEnd || 0);
+  state.draftMedia[draftId] = {
+    ...previous,
+    file: state.localFile || previous.file || null,
+    url: state.localUrl || previous.url || null,
+    trimStart: start,
+    trimEnd: end > start ? end : null,
+  };
+}
+
+function releaseDraftMedia(draftId) {
+  if (!draftId) return;
+  const draft = state.draftMedia[draftId];
+  const urls = new Set([draft?.url]);
+  if (state.activeDraftId === draftId) urls.add(state.localUrl);
+  urls.forEach((url) => {
+    if (url) URL.revokeObjectURL(url);
+  });
+  delete state.draftMedia[draftId];
+  if (state.activeDraftId === draftId) {
+    state.localFile = null;
+    state.localUrl = null;
+  }
+}
+
+function restoreDraftMedia(draftId) {
+  const draft = state.draftMedia[draftId];
+  state.localFile = draft?.file || null;
+  state.localUrl = draft?.url || null;
+  el.fileInput.value = "";
+  if (!state.localUrl || !state.localFile) return false;
+  el.sourceVideo.src = state.localUrl;
+  el.sourceVideo.load();
+  el.transcribeButton.disabled = true;
+  setPreviewButtonsDisabled(false);
+  el.metadata.textContent = `${state.localFile.name} · ${(state.localFile.size / 1024 / 1024).toFixed(1)} MB · 已在浏览器载入，可先预览。`;
+  showManualTrimPanel(draft?.trimStart || 0, draft?.trimEnd || null);
+  return true;
+}
+
 async function uploadCurrentVideo() {
   if (state.jobId) return state.metadata;
   if (state.uploadPromise) return state.uploadPromise;
@@ -708,16 +757,19 @@ async function uploadCurrentVideo() {
     form.append("file", state.localFile);
     toast("正在准备视频...");
     const data = await api("/api/video/upload", { method: "POST", body: form });
-    if (state.activeDraftId) {
-      state.draftTabs = (state.draftTabs || []).filter((id) => id !== state.activeDraftId);
-      delete state.jobMeta[state.activeDraftId];
-      state.activeDraftId = null;
-    }
+    const uploadedDraftId = state.activeDraftId;
+    const uploadedFileName = state.localFile?.name || "视频";
     state.jobId = data.job_id;
     state.activeJobId = data.job_id;
-    ensureJobTab(data.job_id, { title: data.metadata?.title || state.localFile.name });
+    ensureJobTab(data.job_id, { title: data.metadata?.title || uploadedFileName });
     updateMetadata(data.metadata);
     el.sourceVideo.src = data.preview_url;
+    if (uploadedDraftId) {
+      state.draftTabs = (state.draftTabs || []).filter((id) => id !== uploadedDraftId);
+      delete state.jobMeta[uploadedDraftId];
+      releaseDraftMedia(uploadedDraftId);
+      state.activeDraftId = null;
+    }
     el.transcribeButton.disabled = data.metadata?.has_audio === false;
     const canMakePreview = needsBrowserPreview(data.metadata);
     setPreviewButtonsDisabled(data.browser_preview_queued || !canMakePreview);
@@ -1026,12 +1078,13 @@ function renderWorkbenchTabs() {
 }
 
 function createDraftTask() {
+  if (state.activeDraftId) cacheActiveDraftMedia();
   const draftId = `draft_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`;
   state.draftSequence += 1;
   state.draftTabs.push(draftId);
   state.jobMeta[draftId] = { title: `\u672a\u547d\u540d\u4efb\u52a1 ${state.draftSequence}`, isDraft: true };
   state.activeDraftId = draftId;
-  resetCurrentVideoView({ keepTabs: true, silent: true });
+  resetCurrentVideoView({ keepTabs: true, keepLocalMedia: true, silent: true });
   renderWorkbenchTabs();
   refreshTasks().catch(() => {});
   setStatus("新建任务已加入任务中心，等待输入视频");
@@ -1046,6 +1099,8 @@ function ensureJobTab(jobId, meta = {}) {
 }
 
 function closeJobTab(jobId) {
+  const isDraft = (state.draftTabs || []).includes(jobId);
+  if (isDraft) releaseDraftMedia(jobId);
   state.openJobIds = state.openJobIds.filter((id) => id !== jobId);
   state.draftTabs = (state.draftTabs || []).filter((id) => id !== jobId);
   delete state.jobMeta[jobId];
@@ -1555,7 +1610,11 @@ async function clearAllClips() {
 }
 
 function resetCurrentVideoView(options = {}) {
-  if (state.localUrl) URL.revokeObjectURL(state.localUrl);
+  if (!options.keepTabs) {
+    Object.keys(state.draftMedia || {}).forEach((draftId) => releaseDraftMedia(draftId));
+    state.draftMedia = {};
+  }
+  if (state.localUrl && !options.keepLocalMedia) URL.revokeObjectURL(state.localUrl);
   state.localFile = null;
   state.localUrl = null;
   state.jobId = null;
@@ -1777,12 +1836,15 @@ function activeLlmModelLabel() {
 function renderProviderList() {
   const kind = state.providerKind;
   const items = state.providers[kind] || [];
+  const packagedEmpty = state.providersPackaged && state.providerSettingsInitialized && !items.length;
   if (el.providerListTitle) el.providerListTitle.textContent = `${providerKindLabel(kind)} 配置`;
-  if (el.providerListSummary) el.providerListSummary.textContent = items.length ? `已配置 ${items.length} 条，启用的配置将作为工作台默认供应商。` : "还没有配置。";
+  if (el.providerListSummary) el.providerListSummary.textContent = items.length
+    ? `已配置 ${items.length} 条，启用的配置将作为工作台默认供应商。`
+    : (packagedEmpty ? "当前打包版尚未配置供应商，请新增一条。" : "还没有配置。");
   (el.providerEntries || []).forEach((button) => button.classList.toggle("active", button.dataset.providerKind === kind));
   if (!el.providerList) return;
   if (!items.length) {
-    el.providerList.innerHTML = `<div class="provider-empty">暂无${providerKindLabel(kind)}配置，新增一条即可在工作台使用。</div>`;
+    el.providerList.innerHTML = `<div class="provider-empty">${packagedEmpty ? `当前打包版尚未配置${providerKindLabel(kind)}，新增一条即可在工作台使用。` : `暂无${providerKindLabel(kind)}配置，新增一条即可在工作台使用。`}</div>`;
     return;
   }
   const modelLabel = kind === "llm" ? "模型" : "服务";
@@ -1850,6 +1912,8 @@ function hideProviderForm() {
 async function refreshProviders() {
   const data = await api("/api/providers");
   state.providers = { llm: data.llm || [], volcengine: data.volcengine || [] };
+  state.providersPackaged = Boolean(data.packaged);
+  state.providerSettingsInitialized = data.settings_initialized !== false;
   const llm = activeProvider("llm");
   const volc = activeProvider("volcengine");
   if (el.workbenchLlmStatus) el.workbenchLlmStatus.textContent = llm ? `当前使用：${llm.name} · ${llm.model}` : "未启用 LLM 配置，请前往供应商管理添加。";
@@ -1927,11 +1991,19 @@ async function refreshLibraryLegacy() {
 
 async function loadJob(jobId) {
   if ((state.draftTabs || []).includes(jobId)) {
+    if (state.activeDraftId && state.activeDraftId !== jobId) cacheActiveDraftMedia();
     state.activeDraftId = jobId;
-    resetCurrentVideoView({ keepTabs: true, silent: true });
+    resetCurrentVideoView({ keepTabs: true, keepLocalMedia: true, silent: true });
+    restoreDraftMedia(jobId);
     renderWorkbenchTabs();
     setStatus("新建任务：等待输入视频");
     return;
+  }
+  if (state.activeDraftId) {
+    cacheActiveDraftMedia();
+    state.localFile = null;
+    state.localUrl = null;
+    state.activeDraftId = null;
   }
   const data = await api(`/api/job/load?job_id=${encodeURIComponent(jobId)}`);
   ensureJobTab(jobId, { title: data.metadata?.title || jobId });
@@ -2052,7 +2124,10 @@ el.fileInput.addEventListener("change", () => {
   if (!file) return;
   // Keep existing task tabs open. A file selected from a task creates a fresh draft tab first.
   if (state.jobId || !state.activeDraftId) createDraftTask();
-  else if (state.localFile) resetCurrentVideoView({ keepTabs: true, silent: true });
+  else if (state.localFile) {
+    releaseDraftMedia(state.activeDraftId);
+    resetCurrentVideoView({ keepTabs: true, silent: true });
+  }
   if (state.activeDraftId) {
     state.jobMeta[state.activeDraftId] = { ...(state.jobMeta[state.activeDraftId] || {}), title: file.name, isDraft: true };
     renderWorkbenchTabs();
@@ -2066,6 +2141,7 @@ el.fileInput.addEventListener("change", () => {
   setPreviewButtonsDisabled(false);
   el.metadata.textContent = `${file.name} · ${(file.size / 1024 / 1024).toFixed(1)} MB · 已在浏览器载入，可先预览。`;
   showManualTrimPanel(0);
+  cacheActiveDraftMedia();
   toast("视频已载入，请先在轨道上选定转写范围并保存。");
 });
 
@@ -2075,18 +2151,21 @@ el.uploadButton?.addEventListener("click", async () => {
   form.append("file", state.localFile);
   toast("正在上传到本地服务...");
   const data = await api("/api/video/upload", { method: "POST", body: form });
-  if (state.activeDraftId) {
-    state.draftTabs = (state.draftTabs || []).filter((id) => id !== state.activeDraftId);
-    delete state.jobMeta[state.activeDraftId];
-    state.activeDraftId = null;
-  }
+  const uploadedDraftId = state.activeDraftId;
+  const uploadedFileName = state.localFile?.name || "视频";
   state.jobId = data.job_id;
-  ensureJobTab(data.job_id, { title: data.metadata?.title || state.localFile.name });
+  ensureJobTab(data.job_id, { title: data.metadata?.title || uploadedFileName });
   state.activeJobId = data.job_id;
   await refreshTasks();
   switchView("workbench");
   updateMetadata(data.metadata);
   el.sourceVideo.src = data.preview_url;
+  if (uploadedDraftId) {
+    state.draftTabs = (state.draftTabs || []).filter((id) => id !== uploadedDraftId);
+    delete state.jobMeta[uploadedDraftId];
+    releaseDraftMedia(uploadedDraftId);
+    state.activeDraftId = null;
+  }
   el.transcribeButton.disabled = false;
   const canMakePreview = needsBrowserPreview(data.metadata);
   setPreviewButtonsDisabled(data.browser_preview_queued || !canMakePreview);

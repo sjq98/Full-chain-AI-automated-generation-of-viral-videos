@@ -28,7 +28,8 @@ for _proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "http
 
 # 打包成 exe 后（PyInstaller onefile），__file__ 指向临时解压目录，
 # 用户数据/配置必须放到 %APPDATA% 下持久保存；静态资源和 bin 从解压目录读取。
-if getattr(sys, "frozen", False):
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+if IS_FROZEN:
     if sys.platform == "darwin":
         data_base = Path.home() / "Library" / "Application Support"
     elif os.name == "nt":
@@ -52,6 +53,7 @@ TRENDS_DIR = DATA_DIR / "trends"
 MEDIA_CRAWLER_DIR = ROOT / "vendor" / "MediaCrawler"
 MEDIA_CRAWLER_VENV_DIR = MEDIA_CRAWLER_DIR / ".venv"
 SETTINGS_PATH = ROOT / "user-settings.json"
+FROZEN_SETTINGS_MARKER = ROOT / ".settings-initialized-v2"
 TASKS_PATH = RUNTIME_DIR / "tasks.json"
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8789"))
@@ -74,6 +76,24 @@ TREND_TASKS = {}
 def ensure_dirs():
     for path in (STATIC_DIR, JOBS_DIR, OUTPUTS_DIR, RUNTIME_DIR, TRENDS_DIR):
         path.mkdir(parents=True, exist_ok=True)
+    initialize_frozen_settings()
+
+
+def initialize_frozen_settings():
+    """Start packaged builds with a clean, private settings store.
+
+    A development ``user-settings.json`` must never be carried into an exe.
+    The marker is created only in the per-user APPDATA directory, so settings
+    entered by the user in the packaged app remain available on later starts.
+    """
+    if not IS_FROZEN or FROZEN_SETTINGS_MARKER.exists():
+        return
+    # Do not migrate or copy any settings from the bundled application files.
+    # A one-time reset also handles an APPDATA file left by an older build that
+    # had already exposed the development provider list in the packaged UI.
+    write_json(SETTINGS_PATH, {})
+    FROZEN_SETTINGS_MARKER.parent.mkdir(parents=True, exist_ok=True)
+    FROZEN_SETTINGS_MARKER.write_text("2\n", encoding="utf-8")
 
 
 def json_response(handler, payload, status=200):
@@ -753,6 +773,16 @@ def ytdlp_environment():
     return environment
 
 
+def ytdlp_command():
+    """Prefer the bundled Python package over the relocated Windows shim."""
+    package_root = ROOT.parent / ".tools" / "yt-dlp"
+    python_executable = media_crawler_python_path()
+    if package_root.is_dir() and python_executable:
+        return [python_executable, "-m", "yt_dlp"]
+    tool = ytdlp_path()
+    return [tool] if tool else []
+
+
 def run_ytdlp_process(command, task_id):
     """Run yt-dlp while translating its download percentage to the import task."""
     process = subprocess.Popen(
@@ -848,13 +878,13 @@ def create_video_job(source_path, filename, source_url="", source_meta=None):
 
 
 def download_video_as_mp4(candidate, task_id):
-    tool = ytdlp_path()
-    if not tool:
+    runner = ytdlp_command()
+    if not runner:
         raise RuntimeError("未找到 yt-dlp，请先将 yt-dlp.exe 放入项目 bin 或 .tools/yt-dlp/bin")
     target_dir = trend_download_dir(task_id)
     output_template = str(target_dir / "source.%(ext)s")
     command = [
-        tool,
+        *runner,
         "--no-playlist",
         "--newline",
         "--no-warnings",
@@ -2910,6 +2940,8 @@ class Handler(SimpleHTTPRequestHandler):
             saved = provider_settings()
             json_response(self, {
                 "ok": True,
+                "packaged": IS_FROZEN,
+                "settings_initialized": (not IS_FROZEN) or FROZEN_SETTINGS_MARKER.exists(),
                 "llm": [public_provider(item, "llm") for item in saved.get("llm_providers", [])],
                 "volcengine": [public_provider(item, "volcengine") for item in saved.get("volcengine_providers", [])],
             })
@@ -3392,6 +3424,8 @@ class Handler(SimpleHTTPRequestHandler):
         write_json(SETTINGS_PATH, saved)
         json_response(self, {
             "ok": True,
+            "packaged": IS_FROZEN,
+            "settings_initialized": (not IS_FROZEN) or FROZEN_SETTINGS_MARKER.exists(),
             "llm": [public_provider(item, "llm") for item in saved.get("llm_providers", [])],
             "volcengine": [public_provider(item, "volcengine") for item in saved.get("volcengine_providers", [])],
         })

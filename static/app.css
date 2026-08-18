@@ -957,12 +957,12 @@ body { background: #f3f5f8; }
 
 .clip-preview-modal[hidden] { display: none; }
 .clip-preview-modal { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 24px; background: rgba(18, 27, 39, .56); }
-.clip-preview-dialog { width: min(1280px, 100%); max-height: min(900px, calc(100vh - 48px)); overflow: auto; border: 1px solid #cbd6e2; border-radius: 8px; background: #fff; box-shadow: 0 20px 60px rgba(15, 23, 42, .3); }
+.clip-preview-dialog { width: min(1480px, calc(100vw - 32px)); max-height: min(900px, calc(100vh - 48px)); overflow: auto; border: 1px solid #cbd6e2; border-radius: 8px; background: #fff; box-shadow: 0 20px 60px rgba(15, 23, 42, .3); }
 .clip-preview-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
 .clip-preview-dialog-head > div { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .clip-preview-dialog-head h2 { margin: 0; font-size: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .clip-index-chip { width: 36px; height: 28px; display: grid; place-items: center; border-radius: 4px; background: #1d2734; color: #fff; font-weight: 800; font-size: 13px; }
-.clip-preview-dialog-body { display: grid; grid-template-columns: minmax(460px, 1.04fr) minmax(380px, .96fr); min-height: 0; }
+.clip-preview-dialog-body { display: grid; grid-template-columns: minmax(620px, 1.24fr) minmax(420px, .76fr); min-height: 0; }
 .clip-editor-pane { padding: 16px; border-right: 1px solid var(--line); display: grid; align-content: start; gap: 12px; }
 .clip-editor-pane video { width: 100%; aspect-ratio: 16 / 9; background: #0f1720; border-radius: 6px; }
 .modal-timeline { height: 82px; }
