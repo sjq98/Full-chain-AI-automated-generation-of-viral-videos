@@ -52,8 +52,10 @@ RUNTIME_DIR = DATA_DIR / "runtime"
 TRENDS_DIR = DATA_DIR / "trends"
 MEDIA_CRAWLER_DIR = ROOT / "vendor" / "MediaCrawler"
 MEDIA_CRAWLER_VENV_DIR = MEDIA_CRAWLER_DIR / ".venv"
+MEDIA_CRAWLER_RUNTIME_DIR = RUNTIME_DIR / "mediacrawler"
+YTDLP_PACKAGE_DIR = (RES_ROOT / "tools" / "yt-dlp") if IS_FROZEN else (ROOT.parent / ".tools" / "yt-dlp")
 SETTINGS_PATH = ROOT / "user-settings.json"
-FROZEN_SETTINGS_MARKER = ROOT / ".settings-initialized-v2"
+PACKAGED_PROFILE_MARKER = ROOT / ".profile-initialized-v3"
 TASKS_PATH = RUNTIME_DIR / "tasks.json"
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8789"))
@@ -74,26 +76,28 @@ TREND_TASKS = {}
 
 
 def ensure_dirs():
+    initialize_frozen_profile()
     for path in (STATIC_DIR, JOBS_DIR, OUTPUTS_DIR, RUNTIME_DIR, TRENDS_DIR):
         path.mkdir(parents=True, exist_ok=True)
-    initialize_frozen_settings()
 
 
-def initialize_frozen_settings():
-    """Start packaged builds with a clean, private settings store.
+def initialize_frozen_profile():
+    """Start packaged builds with an empty, private user profile.
 
     A development ``user-settings.json`` must never be carried into an exe.
-    The marker is created only in the per-user APPDATA directory, so settings
-    entered by the user in the packaged app remain available on later starts.
+    Jobs, cached search results, and exports also start empty. The marker is
+    created only in the per-user APPDATA directory, so everything the user
+    creates in the packaged app remains available on later starts.
     """
-    if not IS_FROZEN or FROZEN_SETTINGS_MARKER.exists():
+    if not IS_FROZEN or PACKAGED_PROFILE_MARKER.exists():
         return
-    # Do not migrate or copy any settings from the bundled application files.
-    # A one-time reset also handles an APPDATA file left by an older build that
-    # had already exposed the development provider list in the packaged UI.
+    # Do not migrate or copy settings or task data from bundled application
+    # files. This one-time reset also clears APPDATA left by older builds that
+    # displayed development providers, task history, or storage entries.
+    shutil.rmtree(DATA_DIR, ignore_errors=True)
     write_json(SETTINGS_PATH, {})
-    FROZEN_SETTINGS_MARKER.parent.mkdir(parents=True, exist_ok=True)
-    FROZEN_SETTINGS_MARKER.write_text("2\n", encoding="utf-8")
+    PACKAGED_PROFILE_MARKER.parent.mkdir(parents=True, exist_ok=True)
+    PACKAGED_PROFILE_MARKER.write_text("3\n", encoding="utf-8")
 
 
 def json_response(handler, payload, status=200):
@@ -380,6 +384,32 @@ def media_crawler_python_path():
     return ""
 
 
+def bundled_tool_path(name):
+    candidates = [BIN_DIR / name]
+    if os.name == "nt" and not name.endswith(".exe"):
+        candidates.insert(0, BIN_DIR / f"{name}.exe")
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return ""
+
+
+def media_crawler_runner():
+    """Return the packaged crawler executable or the development runner."""
+    configured = str(os.environ.get("MEDIACRAWLER_EXECUTABLE") or "").strip()
+    if configured and Path(configured).exists():
+        return [configured], MEDIA_CRAWLER_RUNTIME_DIR
+    bundled = bundled_tool_path("mediacrawler")
+    if bundled:
+        return [bundled], MEDIA_CRAWLER_RUNTIME_DIR
+    if not MEDIA_CRAWLER_DIR.is_dir() or not (MEDIA_CRAWLER_DIR / "main.py").exists():
+        raise RuntimeError("MediaCrawler 运行组件不存在")
+    python_executable = media_crawler_python_path()
+    if not python_executable:
+        raise RuntimeError("MediaCrawler 依赖尚未安装，请先完成 vendor/MediaCrawler 的 .venv 初始化")
+    return [python_executable, str(MEDIA_CRAWLER_DIR / "main.py")], MEDIA_CRAWLER_DIR
+
+
 def media_crawler_platform_label(platform):
     return {
         "bili": "Bilibili",
@@ -462,11 +492,7 @@ def read_jsonl_items(root):
 
 
 def search_media_crawler_candidates(keywords, platform, limit, start_at="", end_at=""):
-    if not MEDIA_CRAWLER_DIR.is_dir() or not (MEDIA_CRAWLER_DIR / "main.py").exists():
-        raise RuntimeError("MediaCrawler 源码目录不存在")
-    python_executable = media_crawler_python_path()
-    if not python_executable:
-        raise RuntimeError("MediaCrawler 依赖尚未安装，请先完成 vendor/MediaCrawler 的 .venv 初始化")
+    runner, working_dir = media_crawler_runner()
 
     normalized = []
     for keyword in keywords:
@@ -481,7 +507,7 @@ def search_media_crawler_candidates(keywords, platform, limit, start_at="", end_
     output_dir.mkdir(parents=True, exist_ok=True)
     query_keywords = ",".join(normalized)
     command = [
-        python_executable, "main.py",
+        *runner,
         "--platform", platform,
         "--lt", "qrcode",
         "--type", "search",
@@ -496,10 +522,11 @@ def search_media_crawler_candidates(keywords, platform, limit, start_at="", end_
     ]
     environment = os.environ.copy()
     environment["PYTHONUTF8"] = "1"
+    working_dir.mkdir(parents=True, exist_ok=True)
     try:
         process = subprocess.run(
             command,
-            cwd=MEDIA_CRAWLER_DIR,
+            cwd=working_dir,
             env=environment,
             capture_output=True,
             text=True,
@@ -766,18 +793,16 @@ def run_process(cmd, cancel_check=None, on_process=None, env=None):
 def ytdlp_environment():
     """Make the bundled yt-dlp package importable by its console launcher."""
     environment = os.environ.copy()
-    package_root = ROOT.parent / ".tools" / "yt-dlp"
-    if package_root.is_dir():
+    if YTDLP_PACKAGE_DIR.is_dir():
         current = environment.get("PYTHONPATH", "")
-        environment["PYTHONPATH"] = os.pathsep.join(part for part in (str(package_root), current) if part)
+        environment["PYTHONPATH"] = os.pathsep.join(part for part in (str(YTDLP_PACKAGE_DIR), current) if part)
     return environment
 
 
 def ytdlp_command():
     """Prefer the bundled Python package over the relocated Windows shim."""
-    package_root = ROOT.parent / ".tools" / "yt-dlp"
     python_executable = media_crawler_python_path()
-    if package_root.is_dir() and python_executable:
+    if not IS_FROZEN and YTDLP_PACKAGE_DIR.is_dir() and python_executable:
         return [python_executable, "-m", "yt_dlp"]
     tool = ytdlp_path()
     return [tool] if tool else []
@@ -820,8 +845,8 @@ def ytdlp_path():
     candidates = [
         BIN_DIR / "yt-dlp.exe",
         BIN_DIR / "yt-dlp",
-        ROOT.parent / ".tools" / "yt-dlp" / "bin" / "yt-dlp.exe",
-        ROOT.parent / ".tools" / "yt-dlp" / "bin" / "yt-dlp",
+        YTDLP_PACKAGE_DIR / "bin" / "yt-dlp.exe",
+        YTDLP_PACKAGE_DIR / "bin" / "yt-dlp",
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -2941,7 +2966,7 @@ class Handler(SimpleHTTPRequestHandler):
             json_response(self, {
                 "ok": True,
                 "packaged": IS_FROZEN,
-                "settings_initialized": (not IS_FROZEN) or FROZEN_SETTINGS_MARKER.exists(),
+                "settings_initialized": (not IS_FROZEN) or PACKAGED_PROFILE_MARKER.exists(),
                 "llm": [public_provider(item, "llm") for item in saved.get("llm_providers", [])],
                 "volcengine": [public_provider(item, "volcengine") for item in saved.get("volcengine_providers", [])],
             })
@@ -3425,7 +3450,7 @@ class Handler(SimpleHTTPRequestHandler):
         json_response(self, {
             "ok": True,
             "packaged": IS_FROZEN,
-            "settings_initialized": (not IS_FROZEN) or FROZEN_SETTINGS_MARKER.exists(),
+            "settings_initialized": (not IS_FROZEN) or PACKAGED_PROFILE_MARKER.exists(),
             "llm": [public_provider(item, "llm") for item in saved.get("llm_providers", [])],
             "volcengine": [public_provider(item, "volcengine") for item in saved.get("volcengine_providers", [])],
         })
