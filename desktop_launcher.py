@@ -6,7 +6,7 @@ import zipfile
 from pathlib import Path
 
 
-VERSION = "1.0.8"
+VERSION = "1.0.9"
 APP_NAME = "MP4GoldenClipWorkbench"
 
 

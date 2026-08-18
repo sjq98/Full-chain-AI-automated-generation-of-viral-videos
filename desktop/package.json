@@ -1,7 +1,7 @@
 {
   "name": "mp4-golden-clip-workbench",
   "productName": "MP4 Golden Clip Workbench",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Local video transcription, DeepSeek highlight analysis, preview, and original-quality clip export.",
   "main": "main.js",
   "author": "Neko-2077",
@@ -33,6 +33,9 @@
         ]
       }
     ],
+    "electronDownload": {
+      "mirror": "https://npmmirror.com/mirrors/electron/"
+    },
     "win": {
       "signAndEditExecutable": false,
       "target": [

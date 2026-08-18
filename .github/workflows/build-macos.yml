@@ -38,11 +38,13 @@ jobs:
       - name: Install FFmpeg
         run: brew install ffmpeg
 
-      - name: Install Python dependencies
+      - name: Prepare build environment
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install pyinstaller
-          python -m pip install -r requirements.txt
+          python -m venv .build-venv
+          .build-venv/bin/python -m pip install --upgrade pip
+          .build-venv/bin/python -m pip install pyinstaller tos yt-dlp
+          .build-venv/bin/python -m pip install -r requirements.txt
+          .build-venv/bin/python -m pip install -r vendor/MediaCrawler/requirements.txt
 
       - name: Prepare bundled FFmpeg
         run: |
@@ -51,60 +53,11 @@ jobs:
           cp "$(which ffprobe)" bin/ffprobe
           chmod +x bin/ffmpeg bin/ffprobe
 
-      - name: Build backend
+      - name: Build self-contained backend tools
         run: |
-          cat > app_macos.spec <<'PYI'
-          # -*- mode: python ; coding: utf-8 -*-
-          from PyInstaller.utils.hooks import collect_all
-
-          datas = [('static', 'static')]
-          binaries = [('bin/ffmpeg', 'bin'), ('bin/ffprobe', 'bin')]
-          hiddenimports = []
-          tmp_ret = collect_all('tos')
-          datas += tmp_ret[0]
-          binaries += tmp_ret[1]
-          hiddenimports += tmp_ret[2]
-
-          a = Analysis(
-              ['app.py'],
-              pathex=[],
-              binaries=binaries,
-              datas=datas,
-              hiddenimports=hiddenimports,
-              hookspath=[],
-              hooksconfig={},
-              runtime_hooks=[],
-              excludes=[],
-              noarchive=False,
-              optimize=0,
-          )
-          pyz = PYZ(a.pure)
-
-          exe = EXE(
-              pyz,
-              a.scripts,
-              a.binaries,
-              a.datas,
-              [],
-              name='app',
-              debug=False,
-              bootloader_ignore_signals=False,
-              strip=False,
-              upx=False,
-              upx_exclude=[],
-              runtime_tmpdir=None,
-              console=False,
-              disable_windowed_traceback=False,
-              argv_emulation=False,
-              target_arch=None,
-              codesign_identity=None,
-              entitlements_file=None,
-          )
-          PYI
-          pyinstaller app_macos.spec --clean --noconfirm
-          mkdir -p desktop/resources/backend
-          cp dist/app desktop/resources/backend/app
-          chmod +x desktop/resources/backend/app
+          .build-venv/bin/python build_release.py
+          test ! -e desktop/resources/backend/user-settings.json
+          test ! -e desktop/resources/backend/data
 
       - name: Install Electron dependencies
         working-directory: desktop
@@ -125,4 +78,3 @@ jobs:
             desktop/dist/*.zip
             desktop/dist/latest-mac.yml
           if-no-files-found: error
-

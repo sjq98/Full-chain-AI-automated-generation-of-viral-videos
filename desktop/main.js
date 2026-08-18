@@ -51,7 +51,7 @@ function backendCommand() {
   return { cmd: "python", args: [path.join(projectRoot, "app.py")] };
 }
 
-function waitForBackend(port, timeoutMs = 60000) {
+function waitForBackend(port, timeoutMs = 180000) {
   const url = `http://127.0.0.1:${port}/`;
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
