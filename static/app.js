@@ -852,7 +852,7 @@ function renderTrendResults() {
       <span class="trend-platform">${escapeHtml(candidate.platform || "网页视频")}</span>
       <span class="trend-published">${escapeHtml(candidate.published_at || "未提供")}</span>
       <span class="trend-score">${Math.round(Number(candidate.heat_score || 0))}</span>
-      <span class="trend-result-actions"><button type="button" data-trend-import="${escapeHtml(candidate.candidate_id)}" ${locked ? "disabled" : ""}>${trendImportLabel(task)}</button></span>
+      <span class="trend-result-actions"><button type="button" data-trend-import="${escapeHtml(candidate.candidate_id)}" ${locked ? "disabled" : ""} ${task?.status === "error" && task.message ? `title="${escapeHtml(task.message)}"` : ""}>${trendImportLabel(task)}</button></span>
     `;
     row.querySelector("[data-trend-candidate]")?.addEventListener("change", (event) => {
       candidate.selected = event.currentTarget.checked;
@@ -966,6 +966,7 @@ async function ensureTrendImportPolling() {
           const data = await api(`/api/trends/import/status?task_id=${encodeURIComponent(current.task_id)}`);
           const task = data.task;
           state.trends.importTasks[task.task_id] = task;
+          if (task.status === "error" && task.message) toast(`导入失败：${task.message}`);
           if (task.status === "done" && task.job_id && !state.trends.openedJobIds.has(task.job_id)) {
             state.trends.openedJobIds.add(task.job_id);
             ensureJobTab(task.job_id, { title: task.metadata?.title || task.title || task.job_id });

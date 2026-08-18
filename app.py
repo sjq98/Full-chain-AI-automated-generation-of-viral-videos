@@ -423,7 +423,7 @@ def normalize_media_crawler_candidate(item, platform, keyword):
         "heat_label": "公开互动数据",
         "metrics": {"views": views, "likes": likes, "comments": comments, "shares": shares, "collects": collects},
         "keyword": keyword,
-        "search_query": f"{keyword} 视频",
+        "search_query": keyword,
     }
 
 
@@ -459,7 +459,7 @@ def search_media_crawler_candidates(keywords, platform, limit, start_at="", end_
     run_id = f"mc-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
     output_dir = TRENDS_DIR / "mediacrawler" / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
-    query_keywords = ",".join(f"{keyword} 视频" for keyword in normalized)
+    query_keywords = ",".join(normalized)
     command = [
         python_executable, "main.py",
         "--platform", platform,
@@ -719,9 +719,9 @@ def ffprobe_path():
     return bundled_binary("ffprobe")
 
 
-def run_process(cmd, cancel_check=None, on_process=None):
+def run_process(cmd, cancel_check=None, on_process=None, env=None):
     if cancel_check:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", env=env)
         if on_process:
             on_process(proc)
         while proc.poll() is None:
@@ -735,12 +735,22 @@ def run_process(cmd, cancel_check=None, on_process=None):
             time.sleep(0.1)
         stdout, stderr = proc.communicate()
     else:
-        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
         stdout, stderr = proc.stdout, proc.stderr
     if proc.returncode != 0:
         detail = (stderr or stdout or "").strip()
         raise RuntimeError(detail or f"命令执行失败：{' '.join(cmd)}")
     return stdout
+
+
+def ytdlp_environment():
+    """Make the bundled yt-dlp package importable by its console launcher."""
+    environment = os.environ.copy()
+    package_root = ROOT.parent / ".tools" / "yt-dlp"
+    if package_root.is_dir():
+        current = environment.get("PYTHONPATH", "")
+        environment["PYTHONPATH"] = os.pathsep.join(part for part in (str(package_root), current) if part)
+    return environment
 
 
 def ytdlp_path():
@@ -821,7 +831,7 @@ def download_video_as_mp4(candidate, task_id):
         "-o", output_template,
         candidate["url"],
     ]
-    run_process(command)
+    run_process(command, env=ytdlp_environment())
     files = [path for path in target_dir.iterdir() if path.is_file() and path.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}]
     if not files:
         raise RuntimeError("下载器没有产出可识别的视频文件")
