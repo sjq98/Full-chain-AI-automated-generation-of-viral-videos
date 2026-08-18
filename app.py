@@ -753,6 +753,39 @@ def ytdlp_environment():
     return environment
 
 
+def run_ytdlp_process(command, task_id):
+    """Run yt-dlp while translating its download percentage to the import task."""
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=ytdlp_environment(),
+    )
+    output = []
+    while True:
+        line = process.stdout.readline() if process.stdout else ""
+        if line:
+            text_line = line.strip()
+            if text_line:
+                output.append(text_line)
+                match = re.search(r"\[download\]\s+(\d+(?:\.\d+)?)%", text_line)
+                if match:
+                    percent = max(0.0, min(100.0, float(match.group(1))))
+                    progress = 0.05 + (percent / 100.0) * 0.70
+                    set_trend_task(task_id, progress=progress, message=f"正在下载视频 · {percent:.0f}%")
+        elif process.poll() is not None:
+            break
+        else:
+            time.sleep(0.05)
+    return_code = process.wait()
+    if return_code != 0:
+        detail = "\n".join(output[-12:]).strip()
+        raise RuntimeError(detail or f"yt-dlp 下载失败（退出码 {return_code}）")
+
+
 def ytdlp_path():
     candidates = [
         BIN_DIR / "yt-dlp.exe",
@@ -823,7 +856,7 @@ def download_video_as_mp4(candidate, task_id):
     command = [
         tool,
         "--no-playlist",
-        "--no-progress",
+        "--newline",
         "--no-warnings",
         "--restrict-filenames",
         "--merge-output-format", "mp4",
@@ -831,7 +864,7 @@ def download_video_as_mp4(candidate, task_id):
         "-o", output_template,
         candidate["url"],
     ]
-    run_process(command, env=ytdlp_environment())
+    run_ytdlp_process(command, task_id)
     files = [path for path in target_dir.iterdir() if path.is_file() and path.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}]
     if not files:
         raise RuntimeError("下载器没有产出可识别的视频文件")

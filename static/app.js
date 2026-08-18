@@ -822,6 +822,14 @@ function trendImportLabel(task) {
   return "导入失败";
 }
 
+function trendImportProgressText(task) {
+  if (!task) return "";
+  const percent = Math.round(Math.max(0, Math.min(100, Number(task.progress || 0) * 100)));
+  if (task.status === "error") return `失败 · ${task.message || "请重试"}`;
+  if (task.status === "done") return "100% · 已进入工作台";
+  return `${percent}% · ${task.message || "正在处理"}`;
+}
+
 function selectedTrendCandidateIds() {
   if (!el.trendResults) return [];
   return Array.from(el.trendResults.querySelectorAll("[data-trend-candidate]:checked")).map((input) => input.value);
@@ -852,7 +860,7 @@ function renderTrendResults() {
       <span class="trend-platform">${escapeHtml(candidate.platform || "网页视频")}</span>
       <span class="trend-published">${escapeHtml(candidate.published_at || "未提供")}</span>
       <span class="trend-score">${Math.round(Number(candidate.heat_score || 0))}</span>
-      <span class="trend-result-actions"><button type="button" data-trend-import="${escapeHtml(candidate.candidate_id)}" ${locked ? "disabled" : ""} ${task?.status === "error" && task.message ? `title="${escapeHtml(task.message)}"` : ""}>${trendImportLabel(task)}</button></span>
+      <span class="trend-result-actions"><button type="button" data-trend-import="${escapeHtml(candidate.candidate_id)}" ${locked ? "disabled" : ""} ${task?.status === "error" && task.message ? `title="${escapeHtml(task.message)}"` : ""}>${trendImportLabel(task)}</button>${task ? `<small class="trend-import-progress">${escapeHtml(trendImportProgressText(task))}</small>` : ""}</span>
     `;
     row.querySelector("[data-trend-candidate]")?.addEventListener("change", (event) => {
       candidate.selected = event.currentTarget.checked;
