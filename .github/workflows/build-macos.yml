@@ -1,0 +1,128 @@
+name: Build macOS Package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-macos:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            arch: x64
+          - runner: macos-14
+            arch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install FFmpeg
+        run: brew install ffmpeg
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller
+          python -m pip install -r requirements.txt
+
+      - name: Prepare bundled FFmpeg
+        run: |
+          mkdir -p bin
+          cp "$(which ffmpeg)" bin/ffmpeg
+          cp "$(which ffprobe)" bin/ffprobe
+          chmod +x bin/ffmpeg bin/ffprobe
+
+      - name: Build backend
+        run: |
+          cat > app_macos.spec <<'PYI'
+          # -*- mode: python ; coding: utf-8 -*-
+          from PyInstaller.utils.hooks import collect_all
+
+          datas = [('static', 'static')]
+          binaries = [('bin/ffmpeg', 'bin'), ('bin/ffprobe', 'bin')]
+          hiddenimports = []
+          tmp_ret = collect_all('tos')
+          datas += tmp_ret[0]
+          binaries += tmp_ret[1]
+          hiddenimports += tmp_ret[2]
+
+          a = Analysis(
+              ['app.py'],
+              pathex=[],
+              binaries=binaries,
+              datas=datas,
+              hiddenimports=hiddenimports,
+              hookspath=[],
+              hooksconfig={},
+              runtime_hooks=[],
+              excludes=[],
+              noarchive=False,
+              optimize=0,
+          )
+          pyz = PYZ(a.pure)
+
+          exe = EXE(
+              pyz,
+              a.scripts,
+              a.binaries,
+              a.datas,
+              [],
+              name='app',
+              debug=False,
+              bootloader_ignore_signals=False,
+              strip=False,
+              upx=False,
+              upx_exclude=[],
+              runtime_tmpdir=None,
+              console=False,
+              disable_windowed_traceback=False,
+              argv_emulation=False,
+              target_arch=None,
+              codesign_identity=None,
+              entitlements_file=None,
+          )
+          PYI
+          pyinstaller app_macos.spec --clean --noconfirm
+          mkdir -p desktop/resources/backend
+          cp dist/app desktop/resources/backend/app
+          chmod +x desktop/resources/backend/app
+
+      - name: Install Electron dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Build Electron app
+        working-directory: desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npx electron-builder --mac dmg zip --${{ matrix.arch }} --publish never --config.mac.identity=-
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mp4-golden-clip-workbench-macos-${{ matrix.arch }}
+          path: |
+            desktop/dist/*.dmg
+            desktop/dist/*.zip
+            desktop/dist/latest-mac.yml
+          if-no-files-found: error
+

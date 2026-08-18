@@ -1,0 +1,47 @@
+# === 密钥与配置（严禁提交） ===
+user-settings.json
+
+# === 运行时数据 ===
+data/
+work/
+outputs/
+
+# === Python ===
+__pycache__/
+*.pyc
+venv/
+.env
+
+# === Node / Electron ===
+node_modules/
+vendor/**/.venv/
+vendor/**/.git/
+vendor/**/__pycache__/
+vendor/**/cache/
+vendor/**/node_modules/
+dist/
+release/
+desktop/dist/
+desktop/release/
+
+# === 构建产物 ===
+build/
+*.spec
+bin/ffmpeg.exe
+bin/ffprobe.exe
+
+# === 系统 ===
+.DS_Store
+build/
+dist/
+desktop/dist/
+desktop/resources/backend/
+desktop/sfx/workbench.zip
+desktop/sfx/portable.sed
+desktop/sfx/
+release/
+desktop_launcher.spec
+Thumbs.db
+desktop/resources/backend/
+desktop/resources/icon.ico
+.hermes/

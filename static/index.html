@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MP4 &#37329;&#21477;&#29255;&#27573;&#24037;&#20316;&#21488;</title>
+    <link rel="stylesheet" href="/static/app.css?v=compact3" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <div class="brand-lockup" title="MP4 &#37329;&#21477;&#24037;&#20316;&#21488;"><div class="brand-mark">GC</div></div>
+        <nav class="app-nav" aria-label="&#20027;&#23548;&#33322;">
+          <button class="nav-item" type="button" data-view="trends" aria-label="&#29190;&#27454;&#25628;&#32034;" data-tooltip="&#29190;&#27454;&#25628;&#32034;"><span class="nav-icon" aria-hidden="true">&#128269;</span></button>
+          <button class="nav-item active" type="button" data-view="workbench" aria-current="page" aria-label="&#24037;&#20316;&#21488;" data-tooltip="&#24037;&#20316;&#21488;"><span class="nav-icon" aria-hidden="true">&#8962;</span></button>
+          <button class="nav-item" type="button" data-view="tasks" aria-label="&#20219;&#21153;&#20013;&#24515;" data-tooltip="&#20219;&#21153;&#20013;&#24515;"><span class="nav-icon" aria-hidden="true">&#9776;</span><span id="activeTaskCount" class="nav-count" hidden>0</span></button>
+          <button class="nav-item" type="button" data-view="storage" aria-label="&#23384;&#20648;&#31649;&#29702;" data-tooltip="&#23384;&#20648;&#31649;&#29702;"><span class="nav-icon" aria-hidden="true">&#9638;</span></button>
+          <button class="nav-item" type="button" data-view="providers" aria-label="&#20379;&#24212;&#21830;&#31649;&#29702;" data-tooltip="&#20379;&#24212;&#21830;&#31649;&#29702;"><span class="nav-icon" aria-hidden="true">&#9881;</span></button>
+        </nav>
+      </aside>
+
+      <section class="app-main">
+        <header class="topbar">
+          <div>
+            <h1 id="viewTitle">&#24037;&#20316;&#21488;</h1>
+            <p id="viewSubtitle">&#36716;&#20889;&#12289;&#20998;&#26512;&#12289;&#35009;&#21098;&#19982;&#23548;&#20986;</p>
+          </div>
+          <div class="status-pill" id="globalStatus">&#31561;&#24453;&#19978;&#20256;</div>
+        </header>
+
+        <section id="trendsView" class="app-view" hidden>
+          <section class="panel page-panel trends-page">
+            <div class="page-panel-head">
+              <div><h2>&#29190;&#27454;&#25628;&#32034;</h2><p>&#36755;&#20837;&#20851;&#38190;&#35789;&#65292;&#25214;&#21040;&#36817;&#26399;&#39640;&#28909;&#24230;&#35270;&#39057;&#65292;&#36873;&#25321;&#21518;&#23548;&#20837;&#24037;&#20316;&#21488;&#12290;</p></div>
+              <span id="trendProviderBadge" class="trend-provider-badge">Bing &#35270;&#39057;&#25628;&#32034;</span>
+            </div>
+            <div class="trend-search-form">
+              <label class="trend-keyword-field">&#20851;&#38190;&#35789;<input id="trendKeywords" type="text" placeholder="&#20363;&#22914;&#65306;&#21517;&#20154;&#35775;&#35848;&#12289;AI &#21830;&#19994;&#12289;&#21830;&#19994;&#30693;&#35782;&#65292;&#29992;&#36887;&#21495;&#25110;&#31354;&#26684;&#20998;&#38548;" /></label>
+              <label>&#25968;&#25454;&#28304;<select id="trendSource"><option value="web" selected>&#32593;&#39029;&#35270;&#39057;&#25628;&#32034;</option><option value="mediacrawler_bili">MediaCrawler · Bilibili</option><option value="mediacrawler_dy">MediaCrawler · &#25238;&#38899;</option><option value="mediacrawler_xhs">MediaCrawler · &#23567;&#32418;&#20070;</option><option value="mediacrawler_ks">MediaCrawler · &#24555;&#25163;</option><option value="mediacrawler_wb">MediaCrawler · &#24494;&#21338;</option></select></label>
+              <label>&#26102;&#38388;&#33539;&#22260;<select id="trendDateRange"><option value="1">&#26368;&#36817; 24 &#23567;&#26102;</option><option value="3">&#26368;&#36817; 3 &#22825;</option><option value="7" selected>&#26368;&#36817; 7 &#22825;</option><option value="30">&#26368;&#36817; 30 &#22825;</option><option value="all">&#19981;&#38480;&#26102;&#38388;</option><option value="custom">&#33258;&#23450;&#20041;</option></select></label>
+              <label>&#20505;&#36873;&#25968;&#37327;<select id="trendLimit"><option value="5">5 &#20010;</option><option value="10" selected>10 &#20010;</option><option value="20">20 &#20010;</option><option value="50">50 &#20010;</option></select></label>
+              <button id="trendSearchButton" class="primary trend-search-button" type="button">&#24320;&#22987;&#25628;&#32034;</button>
+            </div>
+            <div id="trendCustomDates" class="trend-custom-dates" hidden><label>&#24320;&#22987;&#26085;&#26399;<input id="trendStartDate" type="date" /></label><label>&#32467;&#26463;&#26085;&#26399;<input id="trendEndDate" type="date" /></label></div>
+            <div class="trend-search-status"><span id="trendSearchStatus">&#36755;&#20837;&#20851;&#38190;&#35789;&#21518;&#24320;&#22987;&#25628;&#32034;&#12290;</span><span id="trendResultSummary"></span></div>
+            <div class="trend-results-wrap"><div id="trendResults" class="trend-results trend-results-empty">&#25628;&#32034;&#32467;&#26524;&#20250;&#22312;&#36825;&#37324;&#20986;&#29616;&#12290;</div></div>
+          </section>
+        </section>
+
+        <section id="workbenchView" class="app-view">
+          <div class="workbench-topline">
+            <div class="workbench-actions">
+              <button id="newTaskButton" class="compact-action-button" type="button" title="&#28165;&#31354;&#24403;&#21069;&#24037;&#20316;&#21488;&#65292;&#24320;&#22987;&#19968;&#20010;&#26032;&#20219;&#21153;">&#26032;&#24314;&#20219;&#21153;</button>
+              <label class="file-button compact-file-button" title="&#19978;&#20256;&#26032;&#35270;&#39057;">
+                <input id="fileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" />
+                <span>&#19978;&#20256;&#35270;&#39057;</span>
+              </label>
+            </div>
+            <div id="workbenchTabs" class="workbench-tabs" aria-label="&#35270;&#39057;&#20219;&#21153;&#26631;&#31614;"></div>
+          </div>
+
+          <section class="workspace">
+            <div class="left-pane">
+              <section class="panel upload-panel">
+                <div class="panel-head">
+                  <div><h2>&#21407;&#35270;&#39057;</h2><span class="panel-subtitle">&#24403;&#21069;&#20219;&#21153;&#30340;&#39044;&#35272;&#19982;&#36716;&#20889;</span></div>
+                  <div class="source-head-actions"><button id="previewTopButton" type="button" disabled>&#29983;&#25104;&#20860;&#23481;&#39044;&#35272;</button></div>
+                </div>
+                <video id="sourceVideo" controls playsinline></video>
+                <div class="metadata" id="metadata">&#36824;&#27809;&#26377;&#36733;&#20837;&#35270;&#39057;&#12290;</div>
+                <div class="source-trim" id="sourceTrimPanel" hidden>
+                  <div class="source-trim-head">
+                    <div><strong id="activeClipTitle">&#26410;&#36873;&#25321;&#29255;&#27573;</strong><span id="sourceTimeText">00:00:00.000</span></div>
+                  </div>
+                  <div class="clip-timeline" id="trimTimeline" aria-label="&#21333;&#36712;&#36947;&#35009;&#21098;&#36712;&#36947;">
+                    <div class="clip-frame-strip" id="trimFrameStrip" aria-hidden="true"></div>
+                    <div class="clip-selection" id="trimSelection"></div>
+                    <button id="trimStartHandle" class="clip-handle start" type="button" aria-label="&#25302;&#21160;&#24320;&#22836;" title="&#25302;&#21160;&#24320;&#22836;"></button>
+                    <button id="trimEndHandle" class="clip-handle end" type="button" aria-label="&#25302;&#21160;&#32467;&#23614;" title="&#25302;&#21160;&#32467;&#23614;"></button>
+                    <div class="clip-playhead" id="trimPlayhead" aria-hidden="true"></div>
+                  </div>
+                  <div class="trim-readout-grid">
+                    <label>&#24320;&#22836;&#26102;&#38388;<input id="trimStartInput" type="text" placeholder="00:00:00.000" /></label>
+                    <label>&#32467;&#23614;&#26102;&#38388;<input id="trimEndInput" type="text" placeholder="00:00:00.000" /></label>
+                    <label>&#29255;&#27573;&#26102;&#38271;<input id="trimDurationInput" type="text" readonly /></label>
+                  </div>
+                  <div class="clip-actions"><button id="setStartFromCurrent" type="button">&#24403;&#21069;&#30011;&#38754;&#35774;&#20026;&#24320;&#22836;</button><button id="setEndFromCurrent" type="button">&#24403;&#21069;&#30011;&#38754;&#35774;&#20026;&#32467;&#23614;</button><button id="saveTrimButton" class="primary" type="button">&#20445;&#23384;&#36716;&#20889;&#33539;&#22260;</button></div>
+                </div>
+                <div class="preview-status" id="previewStatus" hidden><div class="preview-status-top"><span id="previewStatusText">&#20860;&#23481;&#39044;&#35272;&#31561;&#24453;&#20013;</span><span id="previewStatusPercent">0%</span></div><div class="progress-bar"><span id="previewProgressBar"></span></div><div class="small" id="previewStatusTime"></div></div>
+                <div class="provider-workbench-status"><div><strong>&#28779;&#23665;&#35821;&#38899;&#36716;&#20889;</strong><div id="workbenchVolcStatus" class="small">&#27491;&#22312;&#35835;&#21462;&#20379;&#24212;&#21830;&#37197;&#32622;</div></div><button id="manageVolcengineButton" type="button">&#31649;&#29702;&#28779;&#23665;&#37197;&#32622;</button></div>
+                <div class="button-row"><button id="previewButton" disabled>&#29983;&#25104;&#20860;&#23481;&#39044;&#35272;</button><button id="transcribeButton" disabled>&#24320;&#22987;&#36716;&#20889;</button><button id="pauseButton" disabled>&#26242;&#20572;</button><button id="stopButton" class="danger" disabled>&#32467;&#26463;</button></div>
+              </section>
+
+              <section class="panel transcript-panel"><div class="panel-head"><div><h2>&#36716;&#20889;&#25991;&#23383;&#31295;</h2><span class="panel-subtitle">&#25353;&#26102;&#38388;&#20998;&#32452;&#30340;&#36716;&#20889;&#32467;&#26524;</span></div><span id="transcriptCount">0 &#32452;</span></div><div class="transcribe-stats" id="transcribeStats"><span id="stageStat">&#31561;&#24453;&#20219;&#21153;</span><span id="elapsedStat">&#24050;&#29992; 00:00</span><span id="positionStat">&#24050;&#22788;&#29702; 00:00:00.000 / --</span><span id="segmentsStat">0 &#27573;</span></div><div class="progress-wrap"><div class="progress-bar"><span id="progressBar"></span></div><div id="jobMessage">&#31561;&#24453;&#20219;&#21153;&#12290;</div></div><div class="transcript-tools"><span id="transcriptModeText"></span><div class="tool-button-group"><button id="copyTranscriptButton" type="button">&#22797;&#21046;</button><button id="openTranscriptFolderButton" type="button">&#25171;&#24320;&#32467;&#26524;&#25991;&#20214;&#22841;</button><button id="saveTranscriptAsButton" type="button">&#21478;&#23384;</button><button id="resetTranscriptButton" type="button">&#37325;&#26032;&#36733;&#20837;</button><button id="clearTranscriptViewButton" type="button">&#28165;&#31354;&#26174;&#31034;</button></div></div><div id="transcriptFileLocation" class="small"></div><div class="transcript" id="transcript"></div></section>
+              <section class="panel transcript-search-panel"><div class="panel-head"><div><h2>&#20851;&#38190;&#35789;&#25628;&#32034;</h2><span class="panel-subtitle">&#22312;&#21407;&#22987;&#36716;&#20889;&#27573;&#20013;&#31934;&#30830;&#23450;&#20301;</span></div><span id="transcriptSearchCount"></span></div><div class="search-row"><input id="transcriptSearchInput" type="text" placeholder="&#36755;&#20837;&#20851;&#38190;&#35789;&#65292;&#22810;&#20010;&#35789;&#29992;&#31354;&#26684;&#20998;&#38548;" /><button id="transcriptSearchButton" class="primary" type="button">&#25628;&#32034;</button></div><div id="transcriptSearchResults" class="search-results"><div class="search-empty">&#35831;&#36755;&#20837;&#20851;&#38190;&#35789;&#21518;&#25628;&#32034;&#12290;</div></div></section>
+            </div>
+
+            <div class="right-pane">
+              <section class="panel analyze-panel"><div class="panel-head"><div><h2>LLM &#37329;&#21477;&#20998;&#26512;</h2><span class="panel-subtitle">&#20174;&#25991;&#23383;&#31295;&#20013;&#31579;&#36873;&#21487;&#35009;&#21098;&#29255;&#27573;</span></div><button id="manageLlmButton" type="button">&#31649;&#29702; LLM</button></div><div id="workbenchLlmStatus" class="provider-inline-status">&#27491;&#22312;&#35835;&#21462; LLM &#37197;&#32622;</div><div class="form-grid"><label>&#30446;&#26631;&#29255;&#27573;&#25968;<input id="clipCount" type="number" min="1" max="50" value="20" /></label><label>&#26368;&#30701;&#31186;&#25968;<input id="minSeconds" type="number" min="3" max="120" value="8" /></label><label>&#26368;&#38271;&#31186;&#25968;<input id="maxSeconds" type="number" min="5" max="180" value="45" /></label></div><div class="button-row"><button id="analyzeButton" class="primary" disabled>&#20998;&#26512;&#37329;&#21477;&#29255;&#27573;</button><button id="pauseAnalyzeButton" type="button" disabled>&#26242;&#20572;&#20998;&#26512;</button><button id="stopAnalyzeButton" class="danger" type="button" disabled>&#32467;&#26463;&#20998;&#26512;</button><button id="renderAllButton" disabled>&#29983;&#25104;&#20840;&#37096;&#39044;&#35272;</button><button id="exportButton" disabled>&#23548;&#20986;&#24050;&#30830;&#35748;&#29255;&#27573;</button><button id="resetAnalyzeButton" type="button">&#37325;&#32622;&#21442;&#25968;</button></div><div id="analyzeStatus" class="status-text"></div><label class="export-path">&#23548;&#20986;&#30446;&#24405;<div class="export-row"><input id="exportDirectory" type="text" placeholder="&#30041;&#31354;&#21017;&#20445;&#23384;&#21040;&#26412;&#35270;&#39057;&#30340;&#32467;&#26524;&#25991;&#20214;&#22841;" /><button id="chooseExportDirectoryButton" type="button">&#36873;&#25321;&#25991;&#20214;&#22841;</button><button id="clearExportDirectoryButton" type="button">&#28165;&#31354;</button></div></label></section>
+              <section class="panel clips-panel"><div class="panel-head"><div><h2>&#20505;&#36873;&#29255;&#27573;&#24635;&#35272;</h2><span class="panel-subtitle">&#20808;&#27604;&#36739;&#26631;&#39064;&#12289;&#25512;&#33616;&#29702;&#30001;&#19982;&#25351;&#25968;&#65292;&#25353;&#38656;&#25171;&#24320;&#39044;&#35272;&#32534;&#36753;</span></div><div class="panel-head-actions"><span id="clipSummary">0 &#20010;&#20505;&#36873;</span><button id="clearClipsButton" class="danger" type="button">&#28165;&#31354;</button></div></div><div id="clips" class="clips-empty">LLM &#20998;&#26512;&#21518;&#20250;&#22312;&#36825;&#37324;&#20986;&#29616;&#20505;&#36873;&#29255;&#27573;&#24635;&#35272;&#12290;</div></section>
+            </div>
+          </section>
+        </section>
+
+        <section id="providersView" class="app-view" hidden>
+          <section class="panel page-panel provider-page"><div class="page-panel-head"><div><h2>&#20379;&#24212;&#21830;&#31649;&#29702;</h2><p>&#36873;&#25321;&#35201;&#31649;&#29702;&#30340;&#26381;&#21153;&#31867;&#22411;&#12290;&#21551;&#29992;&#30340;&#37197;&#32622;&#20250;&#25104;&#20026;&#24403;&#21069;&#24037;&#20316;&#21488;&#30340;&#40664;&#35748;&#20379;&#24212;&#21830;&#12290;</p></div></div><div class="provider-entry-grid"><button class="provider-entry" data-provider-kind="llm" type="button"><strong>LLM</strong><span>OpenAI &#20860;&#23481; / Anthropic Messages</span></button><button class="provider-entry" data-provider-kind="volcengine" type="button"><strong>&#28779;&#23665;</strong><span>&#35821;&#38899;&#36716;&#20889;&#19982; TOS</span></button></div></section>
+        </section>
+
+        <section id="providerListView" class="app-view" hidden>
+          <section class="panel page-panel provider-page"><div class="page-panel-head"><div><button id="backToProvidersButton" class="back-button" type="button" aria-label="&#36820;&#22238;&#20379;&#24212;&#21830;&#31649;&#29702;" title="&#36820;&#22238;&#20379;&#24212;&#21830;&#31649;&#29702;">&#8592;</button><h2 id="providerListTitle">LLM &#37197;&#32622;</h2><p id="providerListSummary"></p></div><button id="addProviderButton" class="primary" type="button">&#26032;&#22686;&#37197;&#32622;</button></div><div id="providerList" class="provider-list"></div><form id="providerForm" class="provider-form" hidden><div class="panel-head"><div><h2 id="providerFormTitle">&#26032;&#22686;&#37197;&#32622;</h2><span class="panel-subtitle">API Key &#21482;&#20250;&#20445;&#23384;&#22312;&#26412;&#22320;&#65292;&#32534;&#36753;&#26102;&#30041;&#31354;&#21363;&#20445;&#30041;&#26087;&#20540;&#12290;</span></div><button id="cancelProviderButton" type="button">&#21462;&#28040;</button></div><input id="providerId" type="hidden" /><input id="providerKind" type="hidden" /><div id="llmProviderFields" class="provider-form-grid"><label>&#21517;&#31216;<input id="providerName" type="text" maxlength="80" required /></label><label>API Key<input id="providerApiKey" type="password" autocomplete="off" /></label><label>&#25509;&#21475; URL<input id="providerBaseUrl" type="url" placeholder="https://api.example.com/v1" /></label><label>&#21327;&#35758;<select id="providerProtocol"><option value="openai">OpenAI &#20860;&#23481;</option><option value="anthropic">Anthropic Messages</option></select></label><label>&#27169;&#22411;<input id="providerModel" type="text" placeholder="deepseek-chat" /></label></div><div id="volcProviderFields" class="provider-form-grid" hidden><label>&#21517;&#31216;<input id="volcProviderName" type="text" maxlength="80" /></label><label>API Key<input id="volcProviderApiKey" type="password" autocomplete="off" /></label><label>Resource ID<input id="providerResourceId" type="text" value="volc.seedasr.auc" /></label><label>TOS AK<input id="providerTosAccessKey" type="text" /></label><label>TOS SK<input id="providerTosSecretKey" type="password" autocomplete="off" /></label><label>TOS Bucket<input id="providerTosBucket" type="text" /></label><label>Endpoint<input id="providerTosEndpoint" type="text" placeholder="tos-cn-beijing.volces.com" /></label><label>Region<input id="providerTosRegion" type="text" placeholder="cn-beijing" /></label><label>&#38899;&#39057;&#20844;&#32593; URL<input id="providerAudioUrl" type="url" /></label><label>&#36718;&#35810;&#38388;&#38548;&#31186;<input id="providerPollInterval" type="number" min="2" max="30" value="5" /></label><label>TOS &#23545;&#35937;&#21069;&#32512;<input id="providerTosPrefix" type="text" value="mp4-golden-asr" /></label><label>URL &#26377;&#25928;&#31186;<input id="providerTosUrlExpires" type="number" min="60" max="604800" value="86400" /></label></div><label class="checkline"><input id="providerEnabled" type="checkbox" checked />&#20445;&#23384;&#21518;&#21551;&#29992;&#27492;&#37197;&#32622;</label><div class="button-row"><button class="primary" type="submit">&#20445;&#23384;&#37197;&#32622;</button></div></form></section>
+        </section>
+
+        <section id="tasksView" class="app-view" hidden>
+          <section class="panel page-panel"><div class="page-panel-head"><div><h2>&#20219;&#21153;&#20013;&#24515;</h2><p>&#25152;&#26377;&#35270;&#39057;&#30340;&#21518;&#21488;&#20219;&#21153;&#21644;&#23436;&#25104;&#35760;&#24405;</p></div><div class="button-row"><button id="refreshTasksButton" type="button">&#21047;&#26032;</button><button id="clearFinishedTasksButton" class="danger" type="button">&#28165;&#29702;&#24050;&#23436;&#25104;</button></div></div><div class="task-center-toolbar"><div class="segmented-control"><button id="taskFilterActive" class="active" type="button">&#36827;&#34892;&#20013;</button><button id="taskFilterCompleted" type="button">&#24050;&#23436;&#25104;</button></div><span id="taskSummary">0 &#20010;&#20219;&#21153;</span></div><div id="taskList" class="task-list task-list-empty">&#26242;&#26080;&#21518;&#21488;&#20219;&#21153;&#12290;</div></section>
+        </section>
+
+        <section id="storageView" class="app-view" hidden>
+          <section class="panel page-panel"><div class="page-panel-head"><div><h2>&#23384;&#20648;&#31649;&#29702;</h2><p>&#27599;&#26465;&#21407;&#35270;&#39057;&#30340;&#36716;&#20889;&#12289;&#20998;&#26512;&#19982;&#23548;&#20986;&#32467;&#26524;</p></div><button id="refreshLibraryButton" type="button">&#21047;&#26032;&#21015;&#34920;</button></div><div id="library" class="library storage-results"></div></section>
+          <section class="panel storage-maintenance"><div class="panel-head"><div><h2>&#32531;&#23384;&#19982;&#31354;&#38388;</h2><span class="panel-subtitle">&#28165;&#29702;&#20165;&#20924;&#25991;&#20214;&#19981;&#20250;&#24433;&#21709;&#36716;&#20889;&#31295;&#12289;&#20998;&#26512;&#21644;&#24050;&#23548;&#20986;&#29255;&#27573;</span></div><button id="refreshStorageButton" type="button">&#21047;&#26032;</button></div><div class="storage-summary" id="storageSummary">&#23384;&#20648;&#20449;&#24687;&#35835;&#21462;&#20013;</div><div class="button-row"><button id="cleanBrowserPreviewButton" type="button">&#28165;&#29702;&#20860;&#23481;&#39044;&#35272;</button><button id="cleanClipPreviewButton" type="button">&#28165;&#29702;&#20505;&#36873;&#39044;&#35272;</button><button id="cleanAudioCacheButton" type="button">&#28165;&#29702;&#38899;&#39057;&#32531;&#23384;</button><button id="cleanWorkspaceCacheButton" class="danger" type="button">&#20165;&#20445;&#30041;&#37325;&#35201;&#36755;&#20986;</button></div><div id="storageList" class="storage-list"></div></section>
+          <section class="panel destructive-panel"><div><h2>&#21382;&#21490;&#25968;&#25454;</h2><p>&#27492;&#25805;&#20316;&#20250;&#21024;&#38500;&#25152;&#26377;&#21407;&#35270;&#39057;&#12289;&#32467;&#26524;&#19982;&#20219;&#21153;&#35760;&#24405;&#12290;</p></div><button id="clearLibraryButton" class="danger" type="button">&#28165;&#31354;&#20840;&#37096;</button></section>
+        </section>
+      </section>
+    </main>
+    <div id="clipPreviewModal" class="clip-preview-modal" hidden>
+      <section class="clip-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="clipPreviewModalTitle">
+        <header class="clip-preview-dialog-head"><div><span id="clipPreviewIndex" class="clip-index-chip">01</span><h2 id="clipPreviewModalTitle">&#29255;&#27573;&#39044;&#35272;</h2></div><button id="closeClipPreviewButton" class="icon-button" type="button" aria-label="&#20851;&#38381;" title="&#20851;&#38381;">&#215;</button></header>
+        <div class="clip-preview-dialog-body">
+          <section class="clip-editor-pane"><video id="modalClipVideo" controls playsinline></video><div class="clip-timeline modal-timeline" id="modalTrimTimeline"><div class="clip-frame-strip" id="modalTrimFrameStrip" aria-hidden="true"></div><div class="clip-selection" id="modalTrimSelection"></div><button id="modalTrimStartHandle" class="clip-handle start" type="button" aria-label="&#25302;&#21160;&#24320;&#22836;" title="&#25302;&#21160;&#24320;&#22836;"></button><button id="modalTrimEndHandle" class="clip-handle end" type="button" aria-label="&#25302;&#21160;&#32467;&#23614;" title="&#25302;&#21160;&#32467;&#23614;"></button><div class="clip-playhead" id="modalTrimPlayhead" aria-hidden="true"></div></div><div class="modal-trim-readouts"><label>&#24320;&#22836;<input id="modalTrimStartInput" type="text" /></label><label>&#32467;&#23614;<input id="modalTrimEndInput" type="text" /></label><label>&#26102;&#38271;<input id="modalTrimDurationInput" type="text" readonly /></label></div><div class="clip-actions"><button id="modalSetStartButton" type="button">&#24403;&#21069;&#24103;&#35774;&#20026;&#24320;&#22836;</button><button id="modalSetEndButton" type="button">&#24403;&#21069;&#24103;&#35774;&#20026;&#32467;&#23614;</button><button id="modalSaveTrimButton" class="primary" type="button">&#20445;&#23384;&#35009;&#21098;&#26102;&#38388;</button></div></section>
+          <aside id="clipPreviewDetails" class="clip-analysis-pane"></aside>
+        </div>
+      </section>
+    </div>
+<script src="/static/app.js?v=providers11"></script>
+  </body>
+</html>
