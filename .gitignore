@@ -3,6 +3,7 @@ user-settings.json
 
 # === 运行时数据 ===
 data/
+browser_data/
 work/
 outputs/
 

@@ -75,9 +75,9 @@ CDP_HEADLESS = False
 # 浏览器启动超时时间（秒）
 BROWSER_LAUNCH_TIMEOUT = 60
 
-# Reuse a manually opened Chrome session so the user's existing platform login
-# can be used directly. Chrome must be started with the configured CDP port.
-CDP_CONNECT_EXISTING = True
+# Launch and reuse the project's own visible Chrome profile. Its platform
+# login state is persisted, so the user only needs to log in once per platform.
+CDP_CONNECT_EXISTING = False
 
 # 程序结束时是否自动关闭浏览器
 # 设置为 False 可以保持浏览器运行，方便调试

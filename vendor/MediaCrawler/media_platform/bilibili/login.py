@@ -85,6 +85,15 @@ class BilibiliLogin(AbstractLogin):
         login_button_ele = self.context_page.locator(
             "xpath=//div[@class='right-entry__outside go-login-btn']//div"
         )
+        # Bilibili periodically changes the header markup. Fall back to the
+        # visible text used by the current page instead of waiting 30 seconds
+        # for the removed legacy class selector.
+        if await login_button_ele.count() == 0:
+            login_button_ele = self.context_page.get_by_text("登录", exact=True).first
+        if await login_button_ele.count() == 0:
+            login_button_ele = self.context_page.locator("span", has_text="登录").first
+        if await login_button_ele.count() == 0:
+            raise RuntimeError("未找到 B 站登录入口，请确认 MediaCrawler 浏览器窗口已加载完成")
         await login_button_ele.click()
         await asyncio.sleep(1)
         # find login qrcode
