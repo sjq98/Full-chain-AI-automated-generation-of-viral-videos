@@ -867,6 +867,9 @@ body { background: #f3f5f8; }
 .trend-search-form input, .trend-search-form select, .trend-custom-dates input { width: 100%; min-width: 0; min-height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink); }
 .trend-keyword-field input { font-size: 14px; }
 .trend-search-button { min-height: 38px; white-space: nowrap; }
+.trend-browser-hint { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; color: var(--muted); font-size: 12px; }
+.trend-browser-hint button { min-height: 32px; padding: 0 11px; border: 1px solid #bad4ff; border-radius: 6px; background: #f2f7ff; color: #1764cf; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.trend-browser-hint button:hover { background: #e7f0ff; }
 .trend-custom-dates { display: flex; gap: 14px; padding: 12px 0 0; }
 .trend-custom-dates[hidden] { display: none; }
 .trend-custom-dates label { width: 180px; }
@@ -918,6 +921,7 @@ body { background: #f3f5f8; }
   .trend-search-form { grid-template-columns: 1fr 1fr; }
   .trend-keyword-field { grid-column: 1 / -1; }
   .trend-search-button { justify-self: start; }
+  .trend-browser-hint { align-items: flex-start; flex-direction: column; }
 }
 
 /* One-column editing flow and single-track video trimming. */

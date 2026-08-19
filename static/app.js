@@ -70,6 +70,7 @@ const el = {
   trendEndDate: $("trendEndDate"),
   trendCustomDates: $("trendCustomDates"),
   trendSearchButton: $("trendSearchButton"),
+  trendOpenChromeButton: $("trendOpenChromeButton"),
   trendSearchStatus: $("trendSearchStatus"),
   trendResultSummary: $("trendResultSummary"),
   trendResults: $("trendResults"),
@@ -986,6 +987,28 @@ async function runTrendSearch() {
     toast(`视频搜索失败：${err.message}`);
   } finally {
     if (searchToken === state.trends.searchToken) el.trendSearchButton.disabled = false;
+  }
+}
+
+async function openTrendChrome() {
+  const keywords = (el.trendKeywords?.value || "").trim();
+  if (!keywords) {
+    toast("请先输入关键词，再打开 Chrome 搜索页。");
+    el.trendKeywords?.focus();
+    return;
+  }
+  if (el.trendOpenChromeButton) el.trendOpenChromeButton.disabled = true;
+  try {
+    const data = await api("/api/trends/browser/open", {
+      method: "POST",
+      body: JSON.stringify({ keywords, source: el.trendSource?.value || "web" }),
+    });
+    if (el.trendSearchStatus) el.trendSearchStatus.textContent = data.message || "已打开浏览器，请完成登录后返回应用。";
+    toast(data.message || "已打开浏览器");
+  } catch (err) {
+    toast(`打开浏览器失败：${err.message}`);
+  } finally {
+    if (el.trendOpenChromeButton) el.trendOpenChromeButton.disabled = false;
   }
 }
 
@@ -2714,6 +2737,7 @@ if (el.clearClipsButton) el.clearClipsButton.addEventListener("click", clearAllC
 if (el.resetAnalyzeButton) el.resetAnalyzeButton.addEventListener("click", resetAnalyzeControls);
 if (el.clearExportDirectoryButton) el.clearExportDirectoryButton.addEventListener("click", () => { el.exportDirectory.value = ""; toast("导出目录已清空，将保存到本视频的结果文件夹。"); });
 if (el.trendSearchButton) el.trendSearchButton.addEventListener("click", runTrendSearch);
+if (el.trendOpenChromeButton) el.trendOpenChromeButton.addEventListener("click", openTrendChrome);
 if (el.trendDateRange) el.trendDateRange.addEventListener("change", () => {
   if (el.trendCustomDates) el.trendCustomDates.hidden = el.trendDateRange.value !== "custom";
 });

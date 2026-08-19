@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -907,15 +908,18 @@ def download_video_as_mp4(candidate, task_id):
     if not runner:
         raise RuntimeError("未找到 yt-dlp，请先将 yt-dlp.exe 放入项目 bin 或 .tools/yt-dlp/bin")
     target_dir = trend_download_dir(task_id)
-    output_template = str(target_dir / "source.%(ext)s")
+    for old_file in target_dir.iterdir():
+        if old_file.is_file():
+            old_file.unlink(missing_ok=True)
+    output_template = str(target_dir / "download.%(ext)s")
     command = [
         *runner,
         "--no-playlist",
         "--newline",
         "--no-warnings",
         "--restrict-filenames",
-        "--merge-output-format", "mp4",
-        "--remux-video", "mp4",
+        "--format", "bv*+ba/b",
+        "--merge-output-format", "mkv",
         "-o", output_template,
         candidate["url"],
     ]
@@ -924,16 +928,70 @@ def download_video_as_mp4(candidate, task_id):
     if not files:
         raise RuntimeError("下载器没有产出可识别的视频文件")
     source = max(files, key=lambda path: path.stat().st_mtime)
-    if source.suffix.lower() == ".mp4":
-        return source
-
+    meta = probe_video(source)
+    if meta.get("has_audio") is False:
+        raise RuntimeError("下载结果不含音轨：该视频网页可能只提供纯视频流，或平台限制了音频下载。请打开原视频网页确认后重试。")
     target = target_dir / "source.mp4"
-    run_process([
+    normalize_cmd = [
         ffmpeg_path(), "-y", "-i", str(source),
-        "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast",
-        "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", str(target),
-    ])
+        "-map", "0:v:0", "-map", "0:a:0",
+        "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2",
+        "-movflags", "+faststart", str(target),
+    ]
+    try:
+        run_process(normalize_cmd)
+    except Exception:
+        run_process([
+            ffmpeg_path(), "-y", "-i", str(source),
+            "-map", "0:v:0", "-map", "0:a:0",
+            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", str(target),
+        ])
+    final_meta = probe_video(target)
+    if final_meta.get("has_audio") is not True:
+        raise RuntimeError("MP4 音轨合并失败：生成文件仍没有可用音频流。")
     return target
+
+
+def chrome_executable():
+    candidates = []
+    if os.name == "nt":
+        candidates.extend([
+            Path(os.environ.get("PROGRAMFILES", "")) / "Google/Chrome/Application/chrome.exe",
+            Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Google/Chrome/Application/chrome.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
+        ])
+    elif sys.platform == "darwin":
+        candidates.append(Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"))
+    else:
+        candidates.extend([Path("/usr/bin/google-chrome"), Path("/usr/bin/google-chrome-stable"), Path("/usr/bin/chromium")])
+    for candidate in candidates:
+        if candidate and candidate.exists():
+            return str(candidate)
+    return shutil.which("google-chrome") or shutil.which("chrome") or shutil.which("chromium")
+
+
+def open_chrome_search(payload):
+    keywords = str(payload.get("keywords") or "").strip()
+    source = str(payload.get("source") or "web").strip()
+    if not keywords:
+        raise RuntimeError("请先输入关键词")
+    encoded = urllib.parse.quote_plus(keywords)
+    urls = {
+        "mediacrawler_bili": f"https://search.bilibili.com/all?keyword={encoded}",
+        "mediacrawler_dy": f"https://www.douyin.com/search/{urllib.parse.quote(keywords)}?type=general",
+        "mediacrawler_xhs": f"https://www.xiaohongshu.com/search_result?keyword={encoded}",
+        "mediacrawler_ks": f"https://www.kuaishou.com/search/video?searchKey={encoded}",
+        "mediacrawler_wb": f"https://s.weibo.com/video?q={encoded}",
+        "web": f"https://www.google.com/search?tbm=vid&q={encoded}",
+    }
+    url = urls.get(source, urls["web"])
+    executable = chrome_executable()
+    if executable:
+        subprocess.Popen([executable, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return {"url": url, "browser": "chrome", "message": "已打开 Google Chrome，请完成登录后返回应用继续搜索。"}
+    webbrowser.open(url)
+    return {"url": url, "browser": "default", "message": "未找到 Chrome，已使用系统默认浏览器打开搜索页。"}
 
 
 def trend_import_worker(task_id, candidate):
@@ -3025,6 +3083,8 @@ class Handler(SimpleHTTPRequestHandler):
                     json_response(self, {"ok": True, "task": retry_clip_task(payload.get("task_id"))})
                 elif path == "/api/trends/search":
                     self.handle_trend_search(payload)
+                elif path == "/api/trends/browser/open":
+                    json_response(self, {"ok": True, **open_chrome_search(payload)})
                 elif path == "/api/trends/import":
                     self.handle_trend_import(payload)
                 elif path == "/api/library/delete":
