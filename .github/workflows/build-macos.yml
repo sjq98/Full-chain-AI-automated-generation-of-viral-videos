@@ -125,6 +125,7 @@ jobs:
           test -n "$app_path" || { echo "No .app bundle was produced"; exit 1; }
           test -n "$dmg_path" || { echo "No DMG was produced"; exit 1; }
           codesign --verify --deep --strict --verbose=4 "$app_path"
+          codesign -dv --verbose=4 "$app_path" 2>&1 | grep "Authority=Developer ID Application"
           hdiutil verify "$dmg_path"
           xcrun notarytool submit "$dmg_path" --key "$API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --wait
           xcrun stapler staple "$dmg_path"
