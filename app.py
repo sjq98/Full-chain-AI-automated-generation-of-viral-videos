@@ -986,18 +986,19 @@ def open_chrome_search(payload):
         "web": f"https://www.google.com/search?tbm=vid&q={encoded}",
     }
     url = urls.get(source, urls["web"])
+    # Delegate to the OS shell on Windows. This is more reliable than spawning
+    # a second Chrome process when Chrome is already running or installed per-user.
+    if os.name == "nt":
+        try:
+            os.startfile(url)
+            return {"url": url, "browser": "system", "message": "已打开搜索网页，请完成登录后返回应用。"}
+        except OSError as exc:
+            logging.warning("无法通过系统打开搜索网页: %s", exc)
     executable = chrome_executable()
     if executable:
         try:
-            # --new-window also works when Chrome is already running and makes the
-            # button's effect visible instead of silently reusing a background process.
-            subprocess.Popen(
-                [executable, "--new-window", url],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                close_fds=True,
-            )
-            return {"url": url, "browser": "chrome", "message": "已向 Google Chrome 发送新窗口，请完成登录后返回应用继续搜索。"}
+            subprocess.Popen([executable, "--new-window", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+            return {"url": url, "browser": "chrome", "message": "已打开搜索网页，请完成登录后返回应用。"}
         except OSError as exc:
             logging.warning("无法启动 Chrome (%s): %s", executable, exc)
     try:

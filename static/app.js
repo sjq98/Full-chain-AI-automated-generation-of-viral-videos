@@ -1003,6 +1003,7 @@ async function openTrendChrome() {
       method: "POST",
       body: JSON.stringify({ keywords, source: el.trendSource?.value || "web" }),
     });
+    if (data.url) window.open(data.url, "_blank", "noopener,noreferrer");
     if (el.trendSearchStatus) el.trendSearchStatus.textContent = data.message || "已打开浏览器，请完成登录后返回应用。";
     toast(data.message || "已打开浏览器");
   } catch (err) {
