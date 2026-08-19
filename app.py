@@ -988,10 +988,25 @@ def open_chrome_search(payload):
     url = urls.get(source, urls["web"])
     executable = chrome_executable()
     if executable:
-        subprocess.Popen([executable, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return {"url": url, "browser": "chrome", "message": "已打开 Google Chrome，请完成登录后返回应用继续搜索。"}
-    webbrowser.open(url)
-    return {"url": url, "browser": "default", "message": "未找到 Chrome，已使用系统默认浏览器打开搜索页。"}
+        try:
+            # --new-window also works when Chrome is already running and makes the
+            # button's effect visible instead of silently reusing a background process.
+            subprocess.Popen(
+                [executable, "--new-window", url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+            return {"url": url, "browser": "chrome", "message": "已向 Google Chrome 发送新窗口，请完成登录后返回应用继续搜索。"}
+        except OSError as exc:
+            logging.warning("无法启动 Chrome (%s): %s", executable, exc)
+    try:
+        opened = webbrowser.open(url, new=1)
+    except Exception as exc:
+        raise RuntimeError(f"无法打开浏览器，请手动复制搜索链接：{url}") from exc
+    if not opened:
+        raise RuntimeError(f"浏览器未能启动，请手动复制搜索链接：{url}")
+    return {"url": url, "browser": "default", "message": "未能启动 Chrome，已尝试使用系统默认浏览器打开搜索页。"}
 
 
 def trend_import_worker(task_id, candidate):
