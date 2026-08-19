@@ -75,11 +75,9 @@ CDP_HEADLESS = False
 # 浏览器启动超时时间（秒）
 BROWSER_LAUNCH_TIMEOUT = 60
 
-# Start a dedicated visible Chrome session by default. Connecting to an
-# already-open Chrome requires it to have been launched with a CDP debug port,
-# which is not true for normal user Chrome sessions and can produce unstable
-# navigation errors. The dedicated profile keeps its own login state.
-CDP_CONNECT_EXISTING = False
+# Reuse a manually opened Chrome session so the user's existing platform login
+# can be used directly. Chrome must be started with the configured CDP port.
+CDP_CONNECT_EXISTING = True
 
 # 程序结束时是否自动关闭浏览器
 # 设置为 False 可以保持浏览器运行，方便调试
