@@ -81,10 +81,27 @@ class BilibiliLogin(AbstractLogin):
         """login bilibili website and keep webdriver login state"""
         utils.logger.info("[BilibiliLogin.login_by_qrcode] Begin login bilibili by qrcode ...")
 
+        # Reuse an existing MediaCrawler browser session. The previous code
+        # always clicked the old login selector, which times out on the current
+        # Bilibili DOM even when the page is already authenticated.
+        current_cookie = await self.browser_context.cookies()
+        _, cookie_dict = utils.convert_cookies(current_cookie)
+        if cookie_dict.get("SESSDATA", "") or cookie_dict.get("DedeUserID", ""):
+            utils.logger.info("[BilibiliLogin.login_by_qrcode] Existing login cookies detected, skip QR login")
+            return
+
         # click login button
         login_button_ele = self.context_page.locator(
             "xpath=//div[@class='right-entry__outside go-login-btn']//div"
         )
+        if await login_button_ele.count() == 0:
+            # A changed Bilibili layout may omit the old login button. Let the
+            # crawler continue and let the request layer report an auth error,
+            # instead of waiting 30 seconds and aborting the whole search.
+            utils.logger.warning(
+                "[BilibiliLogin.login_by_qrcode] Login entry not found; continue with current page session"
+            )
+            return
         await login_button_ele.click()
         await asyncio.sleep(1)
         # find login qrcode
