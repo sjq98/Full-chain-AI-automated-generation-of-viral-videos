@@ -74,9 +74,10 @@
       ],
       "category": "public.app-category.video",
       "artifactName": "mp4-golden-clip-workbench-mac-${version}-${arch}.${ext}",
-      "hardenedRuntime": false,
+      "hardenedRuntime": true,
       "gatekeeperAssess": false,
-      "identity": "-"
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
     }
   }
 }
