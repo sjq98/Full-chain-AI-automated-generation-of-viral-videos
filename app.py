@@ -801,10 +801,22 @@ def ytdlp_environment():
 
 
 def ytdlp_command():
-    """Prefer the bundled Python package over the relocated Windows shim."""
+    """Prefer the bundled or MediaCrawler virtual-environment yt-dlp module."""
     python_executable = media_crawler_python_path()
-    if not IS_FROZEN and YTDLP_PACKAGE_DIR.is_dir() and python_executable:
-        return [python_executable, "-m", "yt_dlp"]
+    if not IS_FROZEN and python_executable:
+        if YTDLP_PACKAGE_DIR.is_dir():
+            return [python_executable, "-m", "yt_dlp"]
+        try:
+            installed = subprocess.run(
+                [python_executable, "-c", "import yt_dlp"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+            if installed.returncode == 0:
+                return [python_executable, "-m", "yt_dlp"]
+        except OSError:
+            pass
     tool = ytdlp_path()
     return [tool] if tool else []
 
