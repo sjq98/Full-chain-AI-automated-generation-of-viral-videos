@@ -1,142 +1,66 @@
-name: Build macOS Package
+name: Build macOS DMG
 
 on:
-  workflow_dispatch:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build-macos:
-    name: macOS ${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15-intel
-            arch: x64
-          - runner: macos-15
-            arch: arm64
-
+    runs-on: macos-13
+    timeout-minutes: 90
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v7
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
-      - name: Setup Node
-        uses: actions/setup-node@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
-          cache-dependency-path: desktop/package-lock.json
+          cache-dependency-path: |
+            desktop/package-lock.json
+            vendor/publishers/xhs-mcp/package-lock.json
 
       - name: Install FFmpeg
         run: |
-          brew untap aws/tap || true
-          brew install --formula ffmpeg
-
-      - name: Prepare build environment
-        run: |
-          python -m venv .build-venv
-          .build-venv/bin/python -m pip install --upgrade pip
-          .build-venv/bin/python -m pip install pyinstaller tos yt-dlp
-          .build-venv/bin/python -m pip install -r requirements.txt
-          .build-venv/bin/python -m pip install -r vendor/MediaCrawler/requirements.txt
-
-      - name: Prepare bundled FFmpeg
-        run: |
+          brew install ffmpeg
           mkdir -p bin
-          cp "$(which ffmpeg)" bin/ffmpeg
-          cp "$(which ffprobe)" bin/ffprobe
-          chmod +x bin/ffmpeg bin/ffprobe
+          cp "$(command -v ffmpeg)" bin/ffmpeg
 
-      - name: Build self-contained backend tools
+      - name: Install Python build dependencies
         run: |
-          .build-venv/bin/python build_release.py
-          test ! -e desktop/resources/backend/user-settings.json
-          test ! -e desktop/resources/backend/data
+          python -m pip install --upgrade pip
+          python -m pip install -r vendor/MediaCrawler/requirements.txt pyinstaller tos yt-dlp
 
-      - name: Install Electron dependencies
+      - name: Build the Xiaohongshu publisher runtime
+        working-directory: vendor/publishers/xhs-mcp
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+
+      - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci
 
-      - name: Import Apple Developer ID certificate
-        env:
-          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
-          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          test -n "$MACOS_CERTIFICATE_P12_BASE64" || { echo "Missing MACOS_CERTIFICATE_P12_BASE64 secret"; exit 1; }
-          test -n "$MACOS_CERTIFICATE_PASSWORD" || { echo "Missing MACOS_CERTIFICATE_PASSWORD secret"; exit 1; }
-          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
-          CERTIFICATE_PATH="$RUNNER_TEMP/developer-id-application.p12"
-          export CERTIFICATE_PATH
-          python3 - <<'PY'
-          import base64
-          import os
-          from pathlib import Path
-
-          Path(os.environ["CERTIFICATE_PATH"]).write_bytes(
-              base64.b64decode(os.environ["MACOS_CERTIFICATE_P12_BASE64"])
-          )
-          PY
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productbuild
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application"
-          echo "CSC_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
-
-      - name: Build Electron app
+      - name: Build DMG
         working-directory: desktop
         env:
-          CSC_NAME: "Developer ID Application"
-        run: npx electron-builder --mac dmg --${{ matrix.arch }} --publish never
+          PYTHON: python3
+        run: npm run dist:mac
 
-      - name: Notarize and validate DMG
-        env:
-          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        run: |
-          test -n "$APPLE_API_KEY_P8_BASE64" || { echo "Missing APPLE_API_KEY_P8_BASE64 secret"; exit 1; }
-          test -n "$APPLE_API_KEY_ID" || { echo "Missing APPLE_API_KEY_ID secret"; exit 1; }
-          test -n "$APPLE_API_ISSUER" || { echo "Missing APPLE_API_ISSUER secret"; exit 1; }
-          API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
-          export API_KEY_PATH
-          python3 - <<'PY'
-          import base64
-          import os
-          from pathlib import Path
-
-          Path(os.environ["API_KEY_PATH"]).write_bytes(
-              base64.b64decode(os.environ["APPLE_API_KEY_P8_BASE64"])
-          )
-          PY
-          app_path="$(find desktop/dist -type d -name "*.app" -print -quit)"
-          dmg_path="$(find desktop/dist -maxdepth 1 -name "*.dmg" -print -quit)"
-          test -n "$app_path" || { echo "No .app bundle was produced"; exit 1; }
-          test -n "$dmg_path" || { echo "No DMG was produced"; exit 1; }
-          codesign --verify --deep --strict --verbose=4 "$app_path"
-          codesign -dv --verbose=4 "$app_path" 2>&1 | grep "Authority=Developer ID Application"
-          hdiutil verify "$dmg_path"
-          xcrun notarytool submit "$dmg_path" --key "$API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --wait
-          xcrun stapler staple "$dmg_path"
-          xcrun stapler validate "$dmg_path"
-          spctl --assess --type open --context context:primary-signature -vv "$dmg_path"
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
         with:
-          name: mp4-golden-clip-workbench-macos-${{ matrix.arch }}
-          path: |
-            desktop/dist/*.dmg
-            desktop/dist/latest-mac.yml
+          name: mp4-golden-clip-workbench-macos
+          path: desktop/dist/*.dmg
           if-no-files-found: error
