@@ -1,4 +1,5 @@
 import cgi
+import hashlib
 import html
 import json
 import math
@@ -14,17 +15,21 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from uuid import uuid4
 from xml.etree import ElementTree
+from html.parser import HTMLParser
 
 
-# 本工具为本地直连服务，只访问火山/DeepSeek 公网 API。
-# 若用户系统设置了代理（如 Clash 127.0.0.1:7890）但代理软件未运行，
-# requests/urllib 会走代理导致连接失败（WinError 10061）。这里统一禁用代理。
-for _proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+# Network routing is intentionally direct-only. The app never reads or changes
+# Windows proxy settings; child processes also inherit a cleaned environment.
+PROXY_ENVIRONMENT_KEYS = (
+    "APP_PROXY", "PUBLISHER_PROXY_SERVER",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy",
+)
+for _proxy_var in PROXY_ENVIRONMENT_KEYS:
     os.environ.pop(_proxy_var, None)
 
 # 打包成 exe 后（PyInstaller onefile），__file__ 指向临时解压目录，
@@ -51,13 +56,24 @@ JOBS_DIR = DATA_DIR / "jobs"
 OUTPUTS_DIR = DATA_DIR / "outputs"
 RUNTIME_DIR = DATA_DIR / "runtime"
 TRENDS_DIR = DATA_DIR / "trends"
+TREND_ARTICLE_CACHE_DIR = TRENDS_DIR / "article-cache"
+TREND_KNOWLEDGE_PATH = TRENDS_DIR / "taste-knowledge.json"
 MEDIA_CRAWLER_DIR = ROOT / "vendor" / "MediaCrawler"
 MEDIA_CRAWLER_VENV_DIR = MEDIA_CRAWLER_DIR / ".venv"
 MEDIA_CRAWLER_RUNTIME_DIR = RUNTIME_DIR / "mediacrawler"
+PUBLISHERS_DIR = RES_ROOT / "vendor" / "publishers" if IS_FROZEN else ROOT / "vendor" / "publishers"
+PUBLISHER_RUNTIME_DIR = RUNTIME_DIR / "publishers"
+PUBLISH_CHROME_PROFILE_DIR = PUBLISHER_RUNTIME_DIR / "chrome"
+PUBLISH_LOCAL_ASSETS_DIR = RUNTIME_DIR / "publish-assets"
 YTDLP_PACKAGE_DIR = (RES_ROOT / "tools" / "yt-dlp") if IS_FROZEN else (ROOT.parent / ".tools" / "yt-dlp")
 SETTINGS_PATH = ROOT / "user-settings.json"
 PACKAGED_PROFILE_MARKER = ROOT / ".profile-initialized-v3"
 TASKS_PATH = RUNTIME_DIR / "tasks.json"
+PUBLISH_TASKS_PATH = RUNTIME_DIR / "publish_tasks.json"
+PUBLISH_LOGIN_TASKS_PATH = RUNTIME_DIR / "publish_login_tasks.json"
+PUBLISH_LOCAL_ASSETS_PATH = RUNTIME_DIR / "publish_local_assets.json"
+PUBLISH_DIAGNOSTICS_PATH = RUNTIME_DIR / "publish-diagnostics.jsonl"
+NETWORK_SETTINGS_PATH = RUNTIME_DIR / "network-settings.json"
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8789"))
 MEDIA_CRAWLER_TIMEOUT = max(60, int(os.environ.get("MEDIA_CRAWLER_TIMEOUT", "300")))
@@ -71,6 +87,82 @@ TASK_PERSIST_LAST = 0.0
 TASK_PERSIST_MIN_INTERVAL = 0.75
 TREND_TASK_LOCK = threading.Lock()
 TREND_TASKS = {}
+TREND_DISCOVERY_LOCK = threading.Lock()
+ACTIVE_TREND_DISCOVERY_TASK_ID = None
+TREND_HOTSPOT_LOCK = threading.Lock()
+ACTIVE_TREND_HOTSPOT_TASK_ID = None
+PUBLISH_TASK_LOCK = threading.Lock()
+PUBLISH_TASKS = {}
+PUBLISH_LOGIN_LOCK = threading.Lock()
+PUBLISH_LOGIN_TASKS = {}
+PUBLISH_LOGIN_WORKERS = {}
+PUBLISH_LOGIN_CANCEL_EVENTS = {}
+PUBLISH_BROWSER_LOCK = threading.Lock()
+PUBLISHER_USER_CLOSED_WINDOW_MARKER = "PUBLISHER_USER_CLOSED_WINDOW"
+PUBLISH_MANUAL_TASK_PROBE_LAST = 0.0
+PUBLISH_MANUAL_TASK_PROBE_INTERVAL = 2.0
+
+PUBLISH_PLATFORMS = {
+    "douyin": {
+        "id": "douyin", "name": "抖音", "status": "local_adapter_ready",
+        "label": "douyin-auto-publish · Google Chrome 直接启动", "supports_video": True,
+        "supports_metadata": True, "requires_oauth": True,
+        "adapter": "douyin-auto-publish", "ai_used": False,
+    },
+    "xiaohongshu": {
+        "id": "xiaohongshu", "name": "小红书", "status": "local_adapter_ready",
+        "label": "xhs-mcp · MCP HTTP", "supports_video": True,
+        "supports_metadata": True, "requires_oauth": True,
+        "adapter": "xhs-mcp", "ai_used": False,
+    },
+    "channels": {
+        "id": "channels", "name": "视频号", "status": "local_adapter_ready",
+        "label": "auto-weixin-video · Google Chrome 直接启动", "supports_video": True,
+        "supports_metadata": True, "requires_oauth": True,
+        "adapter": "auto-weixin-video", "ai_used": False,
+    },
+}
+class PublishWindowClosedByUser(RuntimeError):
+    """The user closed the visible platform window before the task completed."""
+
+
+def _publisher_window_closed_by_user(detail):
+    text = str(detail or "")
+    return (
+        PUBLISHER_USER_CLOSED_WINDOW_MARKER in text
+        or "TargetClosedError" in text
+        or "Target page, context or browser has been closed" in text
+        or "登录窗口已关闭" in text
+        or "用户已关闭" in text
+    )
+
+
+def _publish_window_closed_message(platform):
+    name = PUBLISH_PLATFORMS.get(platform, {}).get("name") or "平台"
+    return f"用户已关闭{name}发布窗口，任务已停止，未发布。"
+
+
+def _login_window_closed_message(platform):
+    name = PUBLISH_PLATFORMS.get(platform, {}).get("name") or "平台"
+    return f"用户已关闭{name}登录窗口，登录准备已停止。"
+
+
+def record_publish_diagnostic(platform, event, cause, resolution, detail=""):
+    """Append a sanitized publisher diagnosis for later troubleshooting."""
+    PUBLISH_DIAGNOSTICS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "at": datetime.now().isoformat(timespec="seconds"),
+        "platform": str(platform or ""),
+        "event": str(event or ""),
+        "cause": str(cause or "")[:500],
+        "resolution": str(resolution or "")[:500],
+        "detail": str(detail or "")[-1500:],
+    }
+    try:
+        with PUBLISH_DIAGNOSTICS_PATH.open("a", encoding="utf-8") as output:
+            output.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 
@@ -78,7 +170,7 @@ TREND_TASKS = {}
 
 def ensure_dirs():
     initialize_frozen_profile()
-    for path in (STATIC_DIR, JOBS_DIR, OUTPUTS_DIR, RUNTIME_DIR, TRENDS_DIR):
+    for path in (STATIC_DIR, JOBS_DIR, OUTPUTS_DIR, RUNTIME_DIR, TRENDS_DIR, PUBLISHER_RUNTIME_DIR, PUBLISH_CHROME_PROFILE_DIR, PUBLISH_LOCAL_ASSETS_DIR):
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -105,20 +197,90 @@ def json_response(handler, payload, status=200):
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
+    # Task and publish state changes frequently; never let a browser cache an old snapshot.
+    handler.send_header("Cache-Control", "no-store, max-age=0")
+    handler.send_header("Pragma", "no-cache")
+    handler.send_header("Expires", "0")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
 
 
 _NO_PROXY_OPENER = None
+class ExternalNetworkError(RuntimeError):
+    """External network failure with a message suitable for any provider."""
+
+
+def public_proxy_url():
+    """Compatibility API for diagnostics; request routing remains direct-only."""
+    return _windows_system_proxy_url()
+
+
+def _windows_system_proxy_url():
+    """Legacy compatibility hook; Windows proxy settings are never consulted."""
+    return ""
+
+
+def remember_public_proxy_candidate():
+    """Remove a legacy proxy cache left by earlier versions of the app."""
+    settings = read_json(NETWORK_SETTINGS_PATH, {})
+    if isinstance(settings, dict) and settings.pop("app_proxy", None) is not None:
+        write_json(NETWORK_SETTINGS_PATH, settings)
+
+
+def strip_proxy_environment(environment):
+    """Return a child-process environment that cannot configure a proxy."""
+    for key in PROXY_ENVIRONMENT_KEYS:
+        environment.pop(key, None)
+    return environment
 
 
 def http_opener():
-    """返回不读取系统/环境变量代理的 urllib opener，保证直连火山/DeepSeek。"""
+    """Return the direct-only opener used for local and fallback requests."""
     global _NO_PROXY_OPENER
     if _NO_PROXY_OPENER is None:
         _NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     return _NO_PROXY_OPENER
+
+
+def proxy_http_opener():
+    """Compatibility API retained for callers; proxy routing is disabled."""
+    return None
+
+
+def public_proxy_is_available(target_url):
+    return False
+
+
+def http_openers():
+    # ``proxy_http_opener`` is a no-op in production. Keeping the optional
+    # slot makes old diagnostics/tests that inject a custom opener harmless,
+    # while Windows settings can never create one.
+    proxy_opener = proxy_http_opener()
+    return (proxy_opener, http_opener()) if proxy_opener is not None else (http_opener(),)
+
+
+def open_public_request(request, timeout):
+    """Open a public request through the direct-only urllib opener."""
+    errors = []
+    openers = http_openers()
+    for index, opener in enumerate(openers):
+        try:
+            return opener.open(request, timeout=timeout)
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, OSError) as exc:
+            errors.append(("直连", exc))
+    last_route, last_error = errors[-1] if errors else ("直连", RuntimeError("unknown network error"))
+    reason = getattr(last_error, "reason", last_error)
+    if getattr(reason, "winerror", None) == 10013 or getattr(last_error, "winerror", None) == 10013:
+        raise ExternalNetworkError(
+            f"外部网络连接（{last_route}）被系统拒绝（WinError 10013）。请检查 Windows 防火墙、网络或安全软件。"
+        ) from last_error
+    if getattr(reason, "winerror", None) == 10061 or getattr(last_error, "winerror", None) == 10061:
+        routes = "；".join(f"{route}: {getattr(err, 'reason', err)}" for route, err in errors)
+        raise ExternalNetworkError(f"无法连接外部服务（WinError 10061）：{routes}") from last_error
+    raise ExternalNetworkError(f"无法连接外部服务：{reason}") from last_error
 
 
 def error_response(handler, message, status=400, **extra):
@@ -139,6 +301,1035 @@ def read_json(path, default):
 def write_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_publish_tasks():
+    global PUBLISH_TASKS
+    saved = read_json(PUBLISH_TASKS_PATH, {})
+    if isinstance(saved, dict):
+        PUBLISH_TASKS = saved
+    else:
+        PUBLISH_TASKS = {}
+    changed = False
+    for task in PUBLISH_TASKS.values():
+        window_closed = (
+            task.get("status") == "error"
+            and _publisher_window_closed_by_user(
+                "\n".join([
+                    str(task.get("message") or ""),
+                    str(task.get("error") or ""),
+                    str((task.get("result") or {}).get("output") or ""),
+                ])
+            )
+        )
+        interrupted = task.get("status") in {"queued", "running"}
+        manual_page_lost = (
+            task.get("status") == "succeeded"
+            and task.get("result_state") == "awaiting_manual_confirmation"
+        )
+        if window_closed:
+            task["status"] = "cancelled"
+            task["result_state"] = "cancelled_by_user"
+            task["message"] = _publish_window_closed_message(task.get("platform"))
+            task["error"] = ""
+            task["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            changed = True
+        elif interrupted or manual_page_lost:
+            task["status"] = "error"
+            task["result_state"] = "interrupted"
+            task["message"] = "应用已重启，无法确认此前的 Chrome 发布页仍可见，请重新执行。"
+            task["error"] = "应用重启中断浏览器发布状态"
+            task["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            changed = True
+    if changed:
+        write_json(PUBLISH_TASKS_PATH, PUBLISH_TASKS)
+    return len(PUBLISH_TASKS)
+
+
+def load_publish_login_tasks():
+    """Restore login-task feedback without treating a stopped app as still logging in."""
+    global PUBLISH_LOGIN_TASKS
+    saved = read_json(PUBLISH_LOGIN_TASKS_PATH, {})
+    PUBLISH_LOGIN_TASKS = saved if isinstance(saved, dict) else {}
+    changed = False
+    for task in PUBLISH_LOGIN_TASKS.values():
+        detail = "\n".join([
+            str(task.get("message") or ""),
+            str(task.get("error") or ""),
+        ])
+        if task.get("status") == "error" and _publisher_window_closed_by_user(detail):
+            task["status"] = "cancelled"
+            task["message"] = _login_window_closed_message(task.get("platform"))
+            task["error"] = ""
+            task["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            changed = True
+        elif task.get("status") in {"queued", "running", "waiting", "verification_required"}:
+            task["status"] = "interrupted"
+            task["message"] = "应用已重启，请重新发起登录准备"
+            task["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            changed = True
+    if changed:
+        write_json(PUBLISH_LOGIN_TASKS_PATH, PUBLISH_LOGIN_TASKS)
+    return len(PUBLISH_LOGIN_TASKS)
+
+
+def persist_publish_tasks():
+    with PUBLISH_TASK_LOCK:
+        write_json(PUBLISH_TASKS_PATH, PUBLISH_TASKS)
+
+
+def _publisher_runtime(platform):
+    runtime_dir = PUBLISHER_RUNTIME_DIR / platform
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    return runtime_dir
+
+
+def _publisher_login_paths(platform):
+    runtime_dir = _publisher_runtime(platform)
+    if platform == "douyin":
+        return {"state_file": runtime_dir / "douyin_state.json"}
+    if platform == "channels":
+        return {
+            "cookie_dir": runtime_dir / "cookies",
+            "cookie_file": runtime_dir / "cookies" / "weixin_video.json",
+            "browser_data": runtime_dir / "browser_data",
+        }
+    if platform == "xiaohongshu":
+        return {"data_dir": runtime_dir}
+    return {}
+
+
+def _state_file_looks_saved(path):
+    if not path or not Path(path).is_file():
+        return False
+    try:
+        payload = read_json(Path(path), {})
+        return bool(payload.get("cookies") or payload.get("origins"))
+    except Exception:
+        return False
+
+
+def _restore_state_cookies_into_context(context, state_file):
+    """Import cookies without the legacy localStorage payload that crashes Chrome."""
+    if not _state_file_looks_saved(state_file):
+        return
+    payload = read_json(Path(state_file), {})
+    cookies = payload.get("cookies") or []
+    if cookies:
+        context.add_cookies(cookies)
+
+
+def _publish_login_state(platform):
+    paths = _publisher_login_paths(platform)
+    with PUBLISH_LOGIN_LOCK:
+        latest = next(
+            (
+                dict(item) for item in sorted(
+                    PUBLISH_LOGIN_TASKS.values(),
+                    key=lambda item: item.get("updated_at") or item.get("created_at") or "",
+                    reverse=True,
+                )
+                if item.get("platform") == platform
+            ),
+            None,
+        )
+    active_statuses = {"queued", "running", "waiting", "verification_required"}
+    if platform == "douyin":
+        saved = _state_file_looks_saved(paths.get("state_file"))
+    elif platform == "channels":
+        saved = _state_file_looks_saved(paths.get("cookie_file"))
+    elif platform == "xiaohongshu":
+        saved = bool((latest or {}).get("result", {}).get("status") == "success")
+    else:
+        saved = False
+    active = latest if latest and latest.get("status") in active_statuses else None
+    if active:
+        label = active.get("message") or "正在准备登录"
+    elif saved:
+        label = "已保存登录态；平台仍可能要求重新验证"
+    elif latest and latest.get("status") == "error":
+        latest_message = str(latest.get("message") or "")
+        if "spawn EPERM" in latest_message:
+            label = "上次浏览器启动被系统拒绝；现在已改用本机 Chrome，请重新点击登录准备"
+        else:
+            label = latest_message[:180] or "上次登录准备失败"
+    else:
+        label = "尚未准备登录态"
+    return {
+        "saved": saved,
+        "active": active,
+        "latest": latest,
+        "label": label,
+    }
+
+
+def publish_capabilities():
+    platforms = []
+    for item in PUBLISH_PLATFORMS.values():
+        current = dict(item)
+        adapter = item.get("adapter")
+        if adapter:
+            current["adapter_present"] = (PUBLISHERS_DIR / adapter).exists()
+        else:
+            current["adapter_present"] = False
+        diagnostics = _adapter_diagnostics(item["id"])
+        current.update(diagnostics)
+        current["login"] = _publish_login_state(item["id"])
+        if not diagnostics.get("ready"):
+            current["status"] = "setup_required"
+            current["label"] = diagnostics.get("label") or ("需要配置：" + "、".join(diagnostics.get("missing") or ["适配器"]))
+        platforms.append(current)
+    return {"platforms": platforms, "ai_integrated": False}
+
+
+def _publisher_python():
+    candidate = MEDIA_CRAWLER_VENV_DIR / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
+    return str(candidate if candidate.exists() else Path(sys.executable))
+
+
+def _publisher_binary(platform, phase="publish"):
+    if not IS_FROZEN:
+        return None
+    names = {
+        ("douyin", "publish"): "douyin-publisher",
+        ("channels", "publish"): "channels-publisher",
+        ("channels", "login"): "channels-login",
+    }
+    name = names.get((platform, phase))
+    if not name:
+        return None
+    suffix = ".exe" if os.name == "nt" else ""
+    candidate = BIN_DIR / f"{name}{suffix}"
+    return str(candidate) if candidate.is_file() else None
+
+
+def _publisher_site_packages():
+    if os.name == "nt":
+        return MEDIA_CRAWLER_VENV_DIR / "Lib" / "site-packages"
+    candidates = sorted((MEDIA_CRAWLER_VENV_DIR / "lib").glob("python*/site-packages"))
+    return candidates[0] if candidates else None
+
+
+def _chrome_executable():
+    """Return Google Chrome only; publishing never falls back to Edge or Chromium."""
+    candidates = [
+        os.environ.get("PUBLISHER_BROWSER_EXECUTABLE"),
+        os.environ.get("GOOGLE_CHROME_BIN"),
+    ]
+    if os.name == "nt":
+        candidates.extend([
+            str(Path(os.environ.get("PROGRAMFILES") or "") / "Google" / "Chrome" / "Application" / "chrome.exe"),
+            str(Path(os.environ.get("PROGRAMFILES(X86)") or "") / "Google" / "Chrome" / "Application" / "chrome.exe"),
+            str(Path(os.environ.get("LOCALAPPDATA") or "") / "Google" / "Chrome" / "Application" / "chrome.exe"),
+        ])
+    elif sys.platform == "darwin":
+        candidates.extend([
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            str(Path.home() / "Applications" / "Google Chrome.app" / "Contents" / "MacOS" / "Google Chrome"),
+        ])
+    else:
+        candidates.extend(["google-chrome", "google-chrome-stable"])
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        name = path.name.lower()
+        is_google_chrome = name in {"chrome.exe", "chrome", "google chrome", "google-chrome", "google-chrome-stable"}
+        if path.is_file() and is_google_chrome:
+            return str(path)
+        located = shutil.which(str(candidate))
+        if located and Path(located).name.lower() in {"chrome.exe", "chrome", "google chrome", "google-chrome", "google-chrome-stable"}:
+            return located
+    return None
+
+
+def _publisher_script(platform):
+    if platform == "douyin":
+        return PUBLISHERS_DIR / "douyin-auto-publish" / "scripts" / "dy_video_publish.py"
+    if platform == "channels":
+        return PUBLISHERS_DIR / "auto-weixin-video" / "scripts" / "publish.py"
+    return None
+
+
+def _publisher_command(platform, phase, *arguments):
+    binary = _publisher_binary(platform, phase)
+    if binary:
+        return [binary, *arguments]
+    script = _publisher_script(platform) if phase == "publish" else None
+    if platform == "channels" and phase == "login":
+        script = PUBLISHERS_DIR / "auto-weixin-video" / "scripts" / "get_cookie.py"
+    if not script or not script.exists():
+        raise RuntimeError(f"未找到 {platform} 发布适配器")
+    return [_publisher_python(), str(script), *arguments]
+
+
+def _python_can_import(module_name):
+    """Check a publisher dependency in the same interpreter used to launch it."""
+    try:
+        completed = subprocess.run(
+            [_publisher_python(), "-c", f"import {module_name}"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        return completed.returncode == 0
+    except Exception:
+        return False
+
+
+def _adapter_diagnostics(platform):
+    if platform == "douyin":
+        script = _publisher_script(platform)
+        chrome = _chrome_executable()
+        playwright_ready = bool(_publisher_binary("douyin") or _python_can_import("playwright"))
+        ready = bool(script and script.exists() and chrome and playwright_ready)
+        missing = []
+        if not chrome:
+            missing.append("Google Chrome")
+        if not playwright_ready:
+            missing.append("Playwright Python 依赖")
+        return {
+            "ready": ready,
+            "setup_required": not ready,
+            "execution_mode": "chrome_direct" if ready else "unavailable",
+            "missing": missing,
+            "label": "douyin-auto-publish · Google Chrome 直接启动" if ready else "douyin-auto-publish 需要 Google Chrome 和 Playwright Python 依赖",
+            "login_hint": "点击登录准备会直接打开 Google Chrome；douyin-auto-publish 的登录态保存在应用运行目录。",
+        }
+    if platform == "channels":
+        script = _publisher_script(platform)
+        chrome = _chrome_executable()
+        playwright_ready = bool(_publisher_binary("channels") or _python_can_import("playwright"))
+        ready = bool(script and script.exists() and chrome and playwright_ready)
+        missing = []
+        if not chrome:
+            missing.append("Google Chrome")
+        if not playwright_ready:
+            missing.append("Playwright Python 依赖")
+        return {
+            "ready": ready,
+            "setup_required": not ready,
+            "execution_mode": "chrome_direct" if ready else "unavailable",
+            "missing": missing,
+            "label": "auto-weixin-video · Google Chrome 直接启动" if ready else "auto-weixin-video 需要 Google Chrome 和 Playwright Python 依赖",
+            "login_hint": "点击登录准备会直接打开 Google Chrome；auto-weixin-video 负责保存视频号 Cookie。",
+        }
+    if platform == "xiaohongshu":
+        root = PUBLISHERS_DIR / "xhs-mcp"
+        built = (root / "dist" / "index.js").exists()
+        node = _node_executable()
+        running = _xhs_mcp_is_running() if built and node is not None else False
+        chrome = _chrome_executable()
+        ready = built and node is not None and chrome is not None
+        missing = []
+        if not built:
+            missing.append("xhs-mcp 构建产物 dist/index.js")
+        if node is None:
+            missing.append("Node.js 运行时")
+        if chrome is None:
+            missing.append("Google Chrome")
+        return {
+            "ready": ready,
+            "setup_required": not ready,
+            "execution_mode": "mcp_http" if ready else "unavailable",
+            "missing": missing,
+            "service_running": running,
+            "label": ("xhs-mcp · MCP HTTP 服务运行中" if running else "xhs-mcp · MCP HTTP 按需启动") if ready else ("需要构建 xhs-mcp" if not built else "需要 Node.js、Google Chrome 运行环境"),
+            "login_hint": "点击登录准备后，xhs-mcp 会创建自己的扫码会话并保存账号状态。",
+        }
+    return {
+        "ready": False,
+        "setup_required": True,
+        "execution_mode": "unavailable",
+        "missing": ["平台适配器"],
+        "label": "暂未配置平台适配器",
+        "login_hint": "当前没有可执行的本地适配器。",
+    }
+
+
+def _node_executable():
+    if IS_FROZEN:
+        bundled = BIN_DIR / ("node.exe" if os.name == "nt" else "node")
+        if bundled.is_file():
+            return str(bundled)
+    configured = os.environ.get("XHS_MCP_NODE_EXECUTABLE")
+    if configured and Path(configured).is_file():
+        return configured
+    return shutil.which("node")
+
+
+XHS_MCP_PROCESS = None
+XHS_MCP_LOCK = threading.Lock()
+XHS_MCP_LOG_HANDLE = None
+
+
+def _xhs_mcp_url():
+    url = (os.environ.get("XHS_MCP_URL") or "http://127.0.0.1:18060").rstrip("/")
+    return url[:-4] if url.endswith("/mcp") else url
+
+
+def _xhs_mcp_is_running():
+    try:
+        request = urllib.request.Request(f"{_xhs_mcp_url()}/health", method="GET")
+        with http_opener().open(request, timeout=0.8) as response:
+            return 200 <= response.status < 300
+    except Exception:
+        return False
+
+
+def _tail_text(path, limit=1600):
+    try:
+        with Path(path).open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - limit), os.SEEK_SET)
+            return handle.read().decode("utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def _ensure_xhs_mcp_server():
+    """Start the bundled xhs-mcp HTTP service when a built checkout is available."""
+    global XHS_MCP_PROCESS, XHS_MCP_LOG_HANDLE
+    if _xhs_mcp_is_running():
+        return
+    root = PUBLISHERS_DIR / "xhs-mcp"
+    entry = root / "dist" / "index.js"
+    node = _node_executable()
+    chrome = _chrome_executable()
+    if not entry.exists() or not node or not chrome:
+        raise RuntimeError("小红书适配器尚未就绪：需要 xhs-mcp 构建产物、Node.js 和 Google Chrome")
+    with XHS_MCP_LOCK:
+        if _xhs_mcp_is_running():
+            return
+        runtime_dir = PUBLISHER_RUNTIME_DIR / "xhs-mcp"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        env = strip_proxy_environment(os.environ.copy())
+        env["XHS_MCP_DATA_DIR"] = str(runtime_dir)
+        env["XHS_MCP_PORT"] = "18060"
+        env["XHS_MCP_HEADLESS"] = "false"
+        env["XHS_MCP_KEEP_OPEN"] = "true"
+        env["XHS_MCP_LOG_LEVEL"] = "info"
+        env["XHS_MCP_CHROME_EXECUTABLE"] = chrome
+        log_path = runtime_dir / "xhs-mcp-server.log"
+        if XHS_MCP_LOG_HANDLE:
+            try:
+                XHS_MCP_LOG_HANDLE.close()
+            except OSError:
+                pass
+        XHS_MCP_LOG_HANDLE = log_path.open("a", encoding="utf-8")
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        XHS_MCP_PROCESS = subprocess.Popen(
+            [node, str(entry), "--http", "--port", "18060"],
+            cwd=str(root),
+            env=env,
+            stdout=XHS_MCP_LOG_HANDLE,
+            stderr=subprocess.STDOUT,
+            creationflags=creationflags,
+        )
+        deadline = time.time() + 12
+        while time.time() < deadline:
+            if _xhs_mcp_is_running():
+                return
+            if XHS_MCP_PROCESS.poll() is not None:
+                break
+            time.sleep(0.4)
+    detail = _tail_text(log_path)
+    if "canvas.node" in detail:
+        detail = "缺少 canvas 原生模块；请在 xhs-mcp 目录执行 npm rebuild canvas"
+    elif detail:
+        detail = detail[-700:]
+    raise RuntimeError(
+        "小红书适配器启动失败：xhs-mcp HTTP 服务未能在 12 秒内就绪"
+        + (f"。详情：{detail}" if detail else "")
+    )
+
+
+def _task_update(task_id, **updates):
+    with PUBLISH_TASK_LOCK:
+        task = PUBLISH_TASKS.get(task_id)
+        if not task:
+            return None
+        task.update(updates)
+        task["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        write_json(PUBLISH_TASKS_PATH, PUBLISH_TASKS)
+        return dict(task)
+
+
+def _mcp_http_call(method, params=None, url=None):
+    endpoint = (url or _xhs_mcp_url()).rstrip("/")
+    if not endpoint.endswith("/mcp"):
+        endpoint += "/mcp"
+    request_body = {
+        "jsonrpc": "2.0",
+        "id": uuid4().hex,
+        "method": method,
+        "params": params or {},
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(request_body, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+        method="POST",
+    )
+    with http_opener().open(request, timeout=30) as response:
+        raw = response.read().decode("utf-8", errors="replace")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        for line in raw.splitlines():
+            if line.startswith("data:"):
+                try:
+                    return json.loads(line.removeprefix("data:").strip())
+                except json.JSONDecodeError:
+                    continue
+        raise RuntimeError(f"xhs-mcp 返回了无法解析的响应：{raw[:300]}")
+
+
+def _mcp_tool_call(name, arguments):
+    init = _mcp_http_call("initialize", {
+        "protocolVersion": "2025-03-26",
+        "capabilities": {},
+        "clientInfo": {"name": "mp4-golden-clip-workbench", "version": "1.0"},
+    })
+    if init.get("error"):
+        raise RuntimeError(init["error"].get("message") or "xhs-mcp 初始化失败")
+    # xhs-mcp uses stateless HTTP transport. Some MCP implementations answer
+    # this notification with an empty 202 body, which is valid and needs no
+    # JSON response from our client.
+    try:
+        _mcp_http_call("notifications/initialized", {})
+    except Exception:
+        pass
+    result = _mcp_http_call("tools/call", {"name": name, "arguments": arguments or {}})
+    if result.get("error"):
+        raise RuntimeError(result["error"].get("message") or f"xhs-mcp 调用 {name} 失败")
+    return result
+
+
+def _mcp_text_payload(result):
+    for item in result.get("result", {}).get("content", []) if isinstance(result, dict) else []:
+        if item.get("type") != "text":
+            continue
+        text = item.get("text") or ""
+        try:
+            return json.loads(text)
+        except (TypeError, json.JSONDecodeError):
+            return {"text": text}
+    return {}
+
+
+def _xhs_publish(task):
+    if task.get("schedule") != "publish_now":
+        raise RuntimeError("小红书当前适配器执行后会直接发布，请选择“自动点击发布”并确认后再执行")
+    _ensure_xhs_mcp_server()
+    result = _mcp_tool_call(
+        "xhs_publish_video",
+        {
+            "title": str(task.get("title") or "")[:20],
+            "content": str(task.get("description") or ""),
+            "videoPath": str(task["file_path"]),
+            "tags": task.get("hashtags") or [],
+            "scheduleTime": task.get("schedule_time") or None,
+        },
+    )
+    return {"raw": result, "payload": _mcp_text_payload(result)}
+
+
+def _login_task_update(login_id, **updates):
+    with PUBLISH_LOGIN_LOCK:
+        task = PUBLISH_LOGIN_TASKS.get(login_id)
+        if not task:
+            return None
+        task.update(updates)
+        task["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        write_json(PUBLISH_LOGIN_TASKS_PATH, PUBLISH_LOGIN_TASKS)
+        return dict(task)
+
+
+def list_publish_login_tasks():
+    with PUBLISH_LOGIN_LOCK:
+        return sorted(PUBLISH_LOGIN_TASKS.values(), key=lambda item: item.get("created_at") or "", reverse=True)
+
+
+def _login_environment(platform):
+    paths = _publisher_login_paths(platform)
+    env = strip_proxy_environment(os.environ.copy())
+    env["PUBLISHER_AI_DISABLED"] = "1"
+    env["PYTHONUTF8"] = "1"
+    chrome = _chrome_executable()
+    if not chrome:
+        raise RuntimeError("未找到 Google Chrome；一键发布不会回退到 Edge 或其他浏览器")
+    PUBLISH_CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    env["PUBLISHER_BROWSER_EXECUTABLE"] = chrome
+    env["PUBLISHER_CHROME_PROFILE_DIR"] = str(PUBLISH_CHROME_PROFILE_DIR)
+    if platform == "douyin":
+        env["DOUYIN_STATE_FILE"] = str(paths["state_file"])
+        env["DOUYIN_LOG_FILE"] = str(_publisher_runtime(platform) / "douyin.log")
+        env["DOUYIN_SCREENSHOT_DIR"] = str(_publisher_runtime(platform) / "screenshots")
+        Path(env["DOUYIN_SCREENSHOT_DIR"]).mkdir(parents=True, exist_ok=True)
+    elif platform == "channels":
+        paths["cookie_dir"].mkdir(parents=True, exist_ok=True)
+        paths["browser_data"].mkdir(parents=True, exist_ok=True)
+        env["WEIXIN_COOKIE_DIR"] = str(paths["cookie_dir"])
+        env["WEIXIN_LOG_DIR"] = str(_publisher_runtime(platform) / "logs")
+        env["WEIXIN_BROWSER_DATA_DIR"] = str(paths["browser_data"])
+        Path(env["WEIXIN_LOG_DIR"]).mkdir(parents=True, exist_ok=True)
+    return env
+
+
+def _hidden_console_subprocess_kwargs():
+    """Do not flash a Windows console when publisher scripts run in the background."""
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    return {}
+
+
+def _reuse_or_create_douyin_creator_page(context):
+    """Use the existing creator page before opening another Chrome tab."""
+    pages = []
+    for page in context.pages:
+        try:
+            if not page.is_closed():
+                pages.append(page)
+        except Exception:
+            continue
+    creator_root = "https://creator.douyin.com/"
+    for page in pages:
+        if str(page.url or "").rstrip("/") == creator_root.rstrip("/"):
+            return page
+    for page in pages:
+        if str(page.url or "").startswith(creator_root):
+            return page
+    for page in pages:
+        if str(page.url or "") in {"", "about:blank", "chrome://newtab/"}:
+            return page
+    return context.new_page()
+
+
+def _douyin_login_prepare(cancel_event=None, on_browser_opened=None, keep_open=True):
+    """Use the upstream direct-launch flow to save a Douyin login state."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        site_packages = _publisher_site_packages()
+        if site_packages and site_packages.is_dir() and str(site_packages) not in sys.path:
+            sys.path.insert(0, str(site_packages))
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            raise RuntimeError("抖音登录准备需要 Playwright Python 依赖") from exc
+    publishers_path = str(PUBLISHERS_DIR)
+    if publishers_path not in sys.path:
+        sys.path.insert(0, publishers_path)
+    from chrome_runtime import (
+        CHROME_LAUNCH_ARGS,
+        PLAYWRIGHT_DEFAULT_ARGS_TO_IGNORE,
+        keep_only_page,
+        prepare_single_visible_page,
+        restore_visible_window,
+    )
+    paths = _publisher_login_paths("douyin")
+    state_file = paths["state_file"]
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    chrome = _chrome_executable()
+    if not chrome:
+        raise RuntimeError("未找到 Google Chrome，请安装 Chrome 后再点击登录准备")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=False,
+            executable_path=chrome,
+            ignore_default_args=PLAYWRIGHT_DEFAULT_ARGS_TO_IGNORE,
+            args=CHROME_LAUNCH_ARGS,
+        )
+        context = browser.new_context(viewport={"width": 1280, "height": 900})
+        _restore_state_cookies_into_context(context, state_file)
+        page = prepare_single_visible_page(context, "https://creator.douyin.com/")
+        if on_browser_opened:
+            on_browser_opened()
+        deadline = time.time() + 600
+        logged_in = False
+        state_saved = False
+        try:
+            page.goto("https://creator.douyin.com/", wait_until="domcontentloaded", timeout=60000)
+            keep_only_page(context, page)
+            restore_visible_window(page)
+            while time.time() < deadline:
+                if cancel_event and cancel_event.is_set():
+                    raise RuntimeError("登录准备已由新的请求替换")
+                if page.is_closed():
+                    if state_saved:
+                        break
+                    raise RuntimeError("登录窗口已关闭，尚未保存登录态。可再次点击“登录准备”重新打开。")
+                current_url = page.url.lower()
+                try:
+                    text = page.locator("body").inner_text(timeout=3000)
+                except Exception:
+                    text = ""
+                cookies = context.cookies()
+                has_session = any("sessionid" in str(cookie.get("name") or "").lower() for cookie in cookies)
+                if has_session and "login" not in current_url and not any(marker in text for marker in ("扫码登录", "手机号登录")):
+                    logged_in = True
+                    if not state_saved:
+                        context.storage_state(path=str(state_file))
+                        state_saved = True
+                    break
+                time.sleep(1)
+            if not logged_in:
+                raise RuntimeError("等待抖音登录超时（10 分钟），请重新点击登录准备")
+            if not state_saved:
+                context.storage_state(path=str(state_file))
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
+    if not _state_file_looks_saved(state_file):
+        raise RuntimeError("抖音登录态未能保存，请重新扫码登录")
+
+
+def _channels_login_prepare():
+    script = PUBLISHERS_DIR / "auto-weixin-video" / "scripts" / "get_cookie.py"
+    if not script.exists():
+        raise RuntimeError("未找到视频号登录准备脚本")
+    completed = subprocess.run(
+        _publisher_command("channels", "login"),
+        cwd=str(script.parent.parent),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=720,
+        env=_login_environment("channels"),
+        **_hidden_console_subprocess_kwargs(),
+    )
+    output = (completed.stdout or "") + ("\n" + completed.stderr if completed.stderr else "")
+    if completed.returncode != 0:
+        raise RuntimeError(output[-2000:] or "视频号登录准备失败")
+    cookie_file = _publisher_login_paths("channels")["cookie_file"]
+    if not _state_file_looks_saved(cookie_file):
+        raise RuntimeError("视频号登录态未能保存，请在打开的浏览器完成扫码后重试")
+
+
+def _xhs_login_prepare():
+    _ensure_xhs_mcp_server()
+    return _mcp_text_payload(_mcp_tool_call("xhs_add_account", {}))
+
+
+def publish_login_worker(login_id, cancel_event=None):
+    task = _login_task_update(
+        login_id,
+        status="running",
+        message="正在打开平台登录窗口，请在浏览器中完成登录",
+        started_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    if not task:
+        return
+    browser_lock_acquired = False
+    try:
+        PUBLISH_BROWSER_LOCK.acquire()
+        browser_lock_acquired = True
+        platform = task["platform"]
+        record_publish_diagnostic(platform, "login_started", "用户发起登录准备", "启动平台登录页", f"login_id={login_id}")
+        if platform == "douyin":
+            _douyin_login_prepare(
+                cancel_event=cancel_event,
+                on_browser_opened=lambda: _login_task_update(
+                    login_id,
+                    status="waiting",
+                    message="浏览器已打开，请在抖音创作者中心完成登录",
+                ),
+                keep_open=True,
+            )
+            result = {"saved": True}
+            message = "抖音登录态已保存，后续发布将自动复用"
+        elif platform == "channels":
+            _channels_login_prepare()
+            result = {"saved": True}
+            message = "视频号登录态已保存，后续发布将自动复用"
+        elif platform == "xiaohongshu":
+            result = _xhs_login_prepare()
+            login_status = result.get("status")
+            if login_status == "success":
+                _login_task_update(login_id, status="succeeded", message="小红书登录态已保存", result=result)
+            else:
+                _login_task_update(
+                    login_id,
+                    status="waiting",
+                    message="小红书登录页已打开，请在浏览器中扫码后点击“检查登录”",
+                    result=result,
+                )
+            return
+        else:
+            raise RuntimeError("该平台尚未配置登录适配器")
+        _login_task_update(login_id, status="succeeded", message=message, result=result)
+        record_publish_diagnostic(platform, "login_finished", "登录态已保存", message)
+    except Exception as exc:
+        with PUBLISH_LOGIN_LOCK:
+            cancelled = PUBLISH_LOGIN_TASKS.get(login_id, {}).get("status") == "cancelled"
+        if not cancelled:
+            if _publisher_window_closed_by_user(exc):
+                message = _login_window_closed_message(task.get("platform"))
+                _login_task_update(login_id, status="cancelled", message=message, error="")
+                record_publish_diagnostic(task.get("platform"), "login_cancelled", "用户关闭了登录窗口", message)
+            else:
+                _login_task_update(login_id, status="error", message=str(exc), error=str(exc))
+                record_publish_diagnostic(
+                    task.get("platform"),
+                    "login_failed",
+                    str(exc),
+                    "查看 AGENTS.md 中同类原因；修复后重新点击登录准备。",
+                )
+    finally:
+        if browser_lock_acquired:
+            PUBLISH_BROWSER_LOCK.release()
+        with PUBLISH_LOGIN_LOCK:
+            PUBLISH_LOGIN_WORKERS.pop(login_id, None)
+            PUBLISH_LOGIN_CANCEL_EVENTS.pop(login_id, None)
+
+
+def check_publish_login(login_id):
+    login_id = str(login_id or "").strip()
+    with PUBLISH_LOGIN_LOCK:
+        task = PUBLISH_LOGIN_TASKS.get(login_id)
+        if not task:
+            raise RuntimeError("找不到登录准备任务")
+        task = dict(task)
+    if task.get("platform") != "xiaohongshu":
+        return task
+    session_id = str((task.get("result") or {}).get("sessionId") or "").strip()
+    if not session_id:
+        raise RuntimeError("小红书登录会话信息不完整，请重新点击登录准备")
+    _ensure_xhs_mcp_server()
+    result = _mcp_text_payload(_mcp_tool_call("xhs_check_login_session", {"sessionId": session_id}))
+    status = str(result.get("status") or "waiting_scan")
+    if status == "success":
+        return _login_task_update(login_id, status="succeeded", message="小红书登录态已保存", result=result)
+    if status == "verification_required":
+        return _login_task_update(
+            login_id,
+            status="verification_required",
+            message="小红书要求短信验证，请完成平台验证后再检查登录",
+            result=result,
+        )
+    if status in {"failed", "expired"}:
+        return _login_task_update(
+            login_id,
+            status="error",
+            message="小红书登录会话已失效，请重新点击登录准备",
+            result=result,
+            error=result.get("error") or status,
+        )
+    return _login_task_update(
+        login_id,
+        status="waiting",
+        message="等待小红书扫码登录",
+        result=result,
+    )
+
+
+def start_publish_login(platform, restart=False):
+    platform = str(platform or "").strip()
+    if platform not in PUBLISH_PLATFORMS:
+        raise RuntimeError("不支持的发布平台")
+    diagnostics = _adapter_diagnostics(platform)
+    if not diagnostics.get("ready") and platform != "xiaohongshu":
+        raise RuntimeError(diagnostics.get("label") or "发布适配器尚未就绪")
+    if platform == "xiaohongshu" and not (PUBLISHERS_DIR / "xhs-mcp" / "dist" / "index.js").exists():
+        raise RuntimeError("小红书适配器尚未构建，暂时无法登录")
+    with PUBLISH_LOGIN_LOCK:
+        existing = next(
+            (
+                item for item in sorted(
+                    PUBLISH_LOGIN_TASKS.values(),
+                    key=lambda current: current.get("created_at") or "",
+                    reverse=True,
+                )
+                if item.get("platform") == platform
+                and item.get("status") in {"queued", "running", "waiting", "verification_required"}
+            ),
+            None,
+        )
+        if existing:
+            worker = PUBLISH_LOGIN_WORKERS.get(existing.get("login_id"))
+            worker_is_running = bool(worker and worker.is_alive())
+            if not restart and worker_is_running:
+                return dict(existing)
+            cancel_event = PUBLISH_LOGIN_CANCEL_EVENTS.get(existing.get("login_id"))
+            if cancel_event:
+                cancel_event.set()
+            existing["status"] = "cancelled"
+            existing["message"] = "已由新的登录准备替代"
+            existing["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        now = datetime.now().isoformat(timespec="seconds")
+        login_id = f"publish-login-{uuid4().hex[:12]}"
+        task = {
+            "login_id": login_id,
+            "platform": platform,
+            "platform_name": PUBLISH_PLATFORMS[platform]["name"],
+            "status": "queued",
+            "message": "已加入登录准备队列",
+            "created_at": now,
+            "updated_at": now,
+        }
+        PUBLISH_LOGIN_TASKS[login_id] = task
+        write_json(PUBLISH_LOGIN_TASKS_PATH, PUBLISH_LOGIN_TASKS)
+        cancel_event = threading.Event()
+        worker = threading.Thread(target=publish_login_worker, args=(login_id, cancel_event), daemon=True)
+        PUBLISH_LOGIN_CANCEL_EVENTS[login_id] = cancel_event
+        PUBLISH_LOGIN_WORKERS[login_id] = worker
+    worker.start()
+    return task
+
+
+def _run_publisher_task(task):
+    platform = task.get("platform")
+    if platform == "xiaohongshu":
+        return _xhs_publish(task)
+    script = _publisher_script(platform)
+    if not script or not script.exists():
+        raise RuntimeError(f"未找到 {platform} 发布适配器")
+    video_path = Path(str(task.get("file_path") or ""))
+    if not video_path.is_file():
+        raise RuntimeError("成片文件不存在，请刷新成片列表")
+    login = _publish_login_state(platform)
+    if not login.get("saved"):
+        raise RuntimeError(f"{PUBLISH_PLATFORMS[platform]['name']}尚未保存登录态，请先点击上方“登录准备”完成登录")
+    title = str(task.get("title") or video_path.stem)
+    description = str(task.get("description") or "")
+    short_title = str((task.get("platform_payload") or {}).get("short_title") or "").strip()
+    hashtags = " ".join(f"#{tag}" for tag in (task.get("hashtags") or []))
+    command = _publisher_command(platform, "publish", "--video", str(video_path), "--title", title)
+    if platform == "douyin":
+        command = _publisher_command("douyin", "publish", str(video_path), "--title", title, "--body", description, "--topics", hashtags, "--location", "")
+        if task.get("schedule") == "publish_now":
+            command.append("--publish")
+    elif platform == "channels":
+        command = _publisher_command(
+            "channels",
+            "publish",
+            "--video",
+            str(video_path),
+            "--title",
+            description or title,
+            "--short-title",
+            short_title,
+            "--tags",
+            hashtags,
+            "--no-location",
+        )
+        if task.get("schedule") == "manual_review":
+            command.append("--manual-finish")
+        elif task.get("schedule") == "draft":
+            command.append("--draft")
+    env = strip_proxy_environment(os.environ.copy())
+    env.update(_login_environment(platform))
+    completed = subprocess.run(
+        command,
+        cwd=str(script.parent.parent),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=1800,
+        env=env,
+        **_hidden_console_subprocess_kwargs(),
+    )
+    output = (completed.stdout or "") + ("\n" + completed.stderr if completed.stderr else "")
+    if completed.returncode != 0:
+        if _publisher_window_closed_by_user(output):
+            raise PublishWindowClosedByUser(_publish_window_closed_message(platform))
+        if "ERR_NETWORK_ACCESS_DENIED" in output:
+            raise RuntimeError(
+                "抖音发布页无法访问：浏览器网络连接被系统拒绝（ERR_NETWORK_ACCESS_DENIED）。"
+                "当前发布器未设置代理；请检查 Windows 防火墙、VPN 或安全软件的网络限制后重试。"
+            )
+        if "BrowserType.launch: spawn EPERM" in output:
+            raise RuntimeError("浏览器启动被系统拒绝（spawn EPERM）。请关闭占用中的 Chrome 后重试，或检查安全软件拦截。")
+        raise RuntimeError(output[-2000:] or f"发布进程退出码 {completed.returncode}")
+    return {"output": output[-4000:]}
+
+
+def publish_task_worker(task_id):
+    task = _task_update(task_id, status="running", message="正在启动 Chrome 并打开平台发布页", started_at=datetime.now().isoformat(timespec="seconds"))
+    if not task:
+        return
+    record_publish_diagnostic(
+        task.get("platform"),
+        "publish_started",
+        "用户发起一键发布",
+        "启动对应平台的本地发布器",
+        f"task_id={task_id}",
+    )
+    try:
+        # Keep one publisher browser active at a time. On this Windows setup,
+        # concurrently creating two Playwright Chrome contexts can close both
+        # drivers before either platform page is ready.
+        with PUBLISH_BROWSER_LOCK:
+            result = _run_publisher_task(task)
+        platform = task.get("platform")
+        schedule = task.get("schedule")
+        if schedule == "manual_review":
+            state = "awaiting_manual_confirmation"
+            message = "已打开并填写发布页，请在浏览器中检查后手动发布"
+        elif schedule == "draft":
+            state = "draft_saved"
+            message = "平台草稿流程已完成"
+        elif platform == "xiaohongshu":
+            payload = result.get("payload") or {}
+            state = "scheduled" if payload.get("scheduled") else ("published" if payload.get("success") else "unknown")
+            message = "小红书发布流程已完成" if state != "unknown" else "小红书已返回结果，请在平台确认发布状态"
+        else:
+            state = "published_or_pending_review"
+            message = "已提交发布流程，请在平台作品列表确认审核状态"
+        _task_update(task_id, status="succeeded", result_state=state, message=message, result=result)
+        record_publish_diagnostic(task.get("platform"), "publish_finished", "发布器正常返回", message)
+    except PublishWindowClosedByUser as exc:
+        _task_update(
+            task_id,
+            status="cancelled",
+            result_state="cancelled_by_user",
+            message=str(exc),
+            error="",
+        )
+        record_publish_diagnostic(task.get("platform"), "publish_cancelled", "用户关闭了发布窗口", str(exc))
+    except Exception as exc:
+        _task_update(task_id, status="error", message=str(exc), error=str(exc))
+        record_publish_diagnostic(
+            task.get("platform"),
+            "publish_failed",
+            str(exc),
+            "查看 AGENTS.md 中同类原因；修复后重新执行。",
+        )
+
+
+def execute_publish_tasks(task_ids):
+    requested = [str(item).strip() for item in (task_ids or []) if str(item).strip()]
+    if not requested:
+        raise RuntimeError("请至少选择一个发布任务")
+    with PUBLISH_TASK_LOCK:
+        selected_tasks = [PUBLISH_TASKS[task_id] for task_id in requested if task_id in PUBLISH_TASKS]
+    if not selected_tasks:
+        raise RuntimeError("找不到可执行的发布任务")
+    for task in selected_tasks:
+        platform = task.get("platform")
+        if platform in {"douyin", "channels"} and not _publish_login_state(platform).get("saved"):
+            raise RuntimeError(f"{PUBLISH_PLATFORMS[platform]['name']}尚未保存登录态，请先点击“登录准备”并完成登录")
+    started = []
+    with PUBLISH_TASK_LOCK:
+        for task_id in requested:
+            task = PUBLISH_TASKS.get(task_id)
+            if not task:
+                continue
+            if task.get("status") == "running":
+                continue
+            task["status"] = "queued"
+            task["message"] = "已加入发布队列"
+            task["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            started.append(task_id)
+        write_json(PUBLISH_TASKS_PATH, PUBLISH_TASKS)
+    for task_id in started:
+        threading.Thread(target=publish_task_worker, args=(task_id,), daemon=True).start()
+    return [PUBLISH_TASKS[item] for item in started]
 
 
 def sanitize_name(name):
@@ -193,6 +1384,74 @@ def trend_search_path(search_id):
     return TRENDS_DIR / f"{safe}.json"
 
 
+def trend_person_pool_path(pool_id):
+    safe = re.sub(r"[^0-9A-Za-z_-]", "", str(pool_id or ""))
+    return TRENDS_DIR / f"{safe}.json"
+
+
+def trend_hotspot_pool_path(pool_id):
+    safe = re.sub(r"[^0-9A-Za-z_-]", "", str(pool_id or ""))
+    return TRENDS_DIR / f"{safe}.json"
+
+
+def trend_knowledge_store():
+    data = read_json(TREND_KNOWLEDGE_PATH, {"entries": []})
+    if not isinstance(data, dict):
+        data = {"entries": []}
+    if not isinstance(data.get("entries"), list):
+        data["entries"] = []
+    changed = False
+    normalized_entries = []
+    for item in data["entries"]:
+        if not isinstance(item, dict):
+            continue
+        entry = dict(item)
+        if not str(entry.get("entry_id") or "").strip():
+            entry["entry_id"] = f"taste-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+            changed = True
+        if not str(entry.get("created_at") or "").strip():
+            entry["created_at"] = datetime.now().isoformat(timespec="seconds")
+            changed = True
+        normalized_entries.append(entry)
+    if len(normalized_entries) != len(data["entries"]):
+        changed = True
+    data["entries"] = normalized_entries
+    if changed:
+        data["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        write_json(TREND_KNOWLEDGE_PATH, data)
+    return data
+
+
+def trend_knowledge_context(limit=18):
+    entries = trend_knowledge_store().get("entries", [])[-limit:]
+    compact = []
+    for entry in entries:
+        compact.append({
+            "主题": entry.get("title") or "",
+            "摘要": entry.get("summary") or "",
+            "内容方向": entry.get("themes") or [],
+            "偏好人物": entry.get("speaker_preferences") or [],
+            "喜欢信号": entry.get("positive_signals") or [],
+            "排除信号": entry.get("negative_signals") or [],
+            "爆款结构": entry.get("content_patterns") or [],
+        })
+    return compact
+
+
+def compact_trend_knowledge_context(limit=6):
+    """Keep taste guidance small; 36Kr supplies the actual current topics."""
+    context = trend_knowledge_context(limit=limit)
+    return [
+        {
+            "主题": item.get("主题", ""),
+            "喜欢信号": item.get("喜欢信号", [])[:4],
+            "排除信号": item.get("排除信号", [])[:4],
+            "爆款结构": item.get("爆款结构", [])[:3],
+        }
+        for item in context
+    ]
+
+
 def trend_download_dir(task_id):
     safe = re.sub(r"[^0-9A-Za-z_-]", "", str(task_id or ""))
     target = TRENDS_DIR / "downloads" / safe
@@ -204,6 +1463,13 @@ def set_trend_task(task_id, **changes):
     with TREND_TASK_LOCK:
         task = TREND_TASKS.setdefault(task_id, {"task_id": task_id, "created_at": datetime.now().isoformat(timespec="seconds")})
         task.update(changes)
+        if "progress" in changes:
+            try:
+                progress = max(0.0, min(1.0, float(task.get("progress") or 0)))
+            except (TypeError, ValueError):
+                progress = 0.0
+            task["progress"] = progress
+            task["percent"] = int(round(progress * 100))
         task["updated_at"] = datetime.now().isoformat(timespec="seconds")
         return dict(task)
 
@@ -254,7 +1520,7 @@ def parse_result_date(value):
             return datetime.fromtimestamp(int(text) / 1000).date()
         except (OSError, OverflowError, ValueError):
             return None
-    for fmt in ("%a, %d %b %Y %H:%M:%S %Z", "%Y-%m-%d", "%Y/%m/%d"):
+    for fmt in ("%a, %d %b %Y %H:%M:%S %Z", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d"):
         try:
             return datetime.strptime(text, fmt).date()
         except ValueError:
@@ -292,7 +1558,9 @@ def fetch_bing_video_candidates(query, keywords, start_at="", end_at=""):
     url = "https://www.bing.com/search?format=rss&q=" + urllib.parse.quote(query)
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"})
     try:
-        with http_opener().open(request, timeout=18) as response:
+        # Keep the news-discovery layer consistent with LLM requests: use the
+        # same direct-only network policy for every public request.
+        with open_public_request(request, timeout=18) as response:
             root = ElementTree.fromstring(response.read())
     except Exception as exc:
         raise RuntimeError(f"搜索服务暂时不可用：{exc}") from exc
@@ -572,6 +1840,1573 @@ def search_media_crawler_candidates(keywords, platform, limit, start_at="", end_
         else:
             warnings.append("MediaCrawler 已运行，但平台没有返回可用视频结果；请确认关键词、登录状态和网络连接。")
     return normalized, candidates, warnings
+
+
+def safe_string_list(value, limit=8, item_limit=80):
+    if not isinstance(value, list):
+        return []
+    values = []
+    for item in value:
+        text = re.sub(r"\s+", " ", str(item or "")).strip()
+        if text and text not in values:
+            values.append(text[:item_limit])
+        if len(values) >= limit:
+            break
+    return values
+
+
+GENERIC_TREND_QUERY_TERMS = {
+    "ai", "人工智能", "热点", "商业", "科技", "公司", "企业", "产品", "行业", "市场", "36氪", "36kr", "新智元",
+    "新闻", "视频", "现场", "采访", "访谈", "演讲", "发布会", "权威报道", "活动", "事件",
+    "医疗", "治疗", "疗法", "癌症", "临床试验", "合作", "发布", "宣布", "全球",
+    "人类", "首次", "史上首次", "突破", "治愈", "历史上第一次", "成功",
+}
+
+
+def compact_search_term(value):
+    return re.sub(r"[\s\W_]+", "", str(value or "").casefold(), flags=re.UNICODE)
+
+
+def hotspot_search_anchors(hotspot, limit=4):
+    """Keep only explicit, discriminative names from the reviewed hotspot."""
+    hotspot = hotspot or {}
+    source_text = compact_search_term(hotspot.get("source_article_text"))
+    anchors = []
+    candidates = merge_search_terms(
+        safe_string_list(hotspot.get("verified_anchors"), limit=8, item_limit=80),
+        safe_string_list(hotspot.get("entities"), limit=8, item_limit=80),
+        limit=12,
+    )
+    for entity in candidates:
+        compact = compact_search_term(entity)
+        if len(compact) < 2 or compact in GENERIC_TREND_QUERY_TERMS:
+            continue
+        if source_text and compact not in source_text:
+            continue
+        if compact not in {compact_search_term(item) for item in anchors}:
+            anchors.append(entity)
+        if len(anchors) >= limit:
+            break
+    return anchors
+
+
+def hotspot_query_subject(hotspot, anchors=None):
+    anchors = anchors if anchors is not None else hotspot_search_anchors(hotspot)
+    if anchors:
+        return " ".join(anchors[:3])
+    return str((hotspot or {}).get("title") or (hotspot or {}).get("source_title") or "热点事件").strip()[:80]
+
+
+def query_anchor_matches(query, anchors):
+    compact_query = compact_search_term(query)
+    return [anchor for anchor in anchors if compact_search_term(anchor) and compact_search_term(anchor) in compact_query]
+
+
+def enforce_hotspot_query_anchors(hotspot, queries, limit=3):
+    """Ensure every media query carries enough verified names to avoid stale generic results."""
+    anchors = hotspot_search_anchors(hotspot)
+    if not anchors:
+        return []
+    subject = hotspot_query_subject(hotspot, anchors)
+    required_count = min(2, len(anchors)) if anchors else 0
+    normalized = []
+    for query in safe_string_list(queries, limit=limit, item_limit=120):
+        matches = query_anchor_matches(query, anchors)
+        if len(matches) < required_count:
+            missing = [anchor for anchor in anchors if anchor not in matches][:required_count - len(matches)]
+            query = f"{' '.join(missing)} {query}".strip()
+        query = re.sub(r"\s+", " ", query).strip()[:120]
+        if query and query not in normalized:
+            normalized.append(query)
+    if normalized:
+        return normalized
+    if not subject:
+        return []
+    return [
+        f"{subject} 新闻现场"[:120],
+        f"{subject} 发布会"[:120],
+        f"{subject} 权威报道"[:120],
+    ]
+
+
+def merge_search_terms(*groups, limit=6):
+    merged = []
+    seen = set()
+    for group in groups:
+        for value in group or []:
+            text = re.sub(r"\s+", " ", str(value or "")).strip()[:80]
+            key = compact_search_term(text)
+            if not text or not key or key in seen:
+                continue
+            seen.add(key)
+            merged.append(text)
+            if len(merged) >= limit:
+                return merged
+    return merged
+
+
+def structure_trend_knowledge(note, provider_id=None):
+    note = re.sub(r"\s+", " ", str(note or "")).strip()
+    if len(note) < 12:
+        raise RuntimeError("请至少补充一段往期主题、偏好或不想要的内容说明。")
+    prompt = f"""把用户的历史短视频主题和选题偏好整理成一条结构化知识库记录。
+不要补充用户未提供的事实；不确定时返回空数组。所有文字使用简体中文。
+
+用户输入：
+{note[:6000]}
+
+返回 JSON：
+{{
+  "title": "不超过24字的主题名称",
+  "summary": "不超过100字，说明这类内容为什么适合或不适合用户",
+  "themes": ["主题或行业"],
+  "speaker_preferences": ["人物类型、人物或身份"],
+  "positive_signals": ["用户偏好的表达、冲突或内容特征"],
+  "negative_signals": ["用户明确不希望出现的内容特征"],
+  "content_patterns": ["可复用的爆款结构，例如企业家判断、失败复盘"],
+  "source_note": "一句话概括原始输入"
+}}"""
+    structure_source = "llm"
+    try:
+        result = llm_json(prompt, provider_id=provider_id, max_tokens=1800)
+    except RuntimeError as exc:
+        # Keep the user's preference usable when the configured LLM is temporarily
+        # unreachable. This fallback never invents tags or claims AI succeeded.
+        result = {
+            "title": note[:24],
+            "summary": note[:100],
+            "themes": [],
+            "speaker_preferences": [],
+            "positive_signals": [],
+            "negative_signals": [],
+            "content_patterns": [],
+            "source_note": note[:800],
+        }
+        structure_source = "fallback"
+        result["structure_warning"] = str(exc)
+    return {
+        "title": str(result.get("title") or "未命名主题").strip()[:80],
+        "summary": str(result.get("summary") or "").strip()[:360],
+        "themes": safe_string_list(result.get("themes")),
+        "speaker_preferences": safe_string_list(result.get("speaker_preferences")),
+        "positive_signals": safe_string_list(result.get("positive_signals")),
+        "negative_signals": safe_string_list(result.get("negative_signals")),
+        "content_patterns": safe_string_list(result.get("content_patterns")),
+        "source_note": str(result.get("source_note") or note).strip()[:800],
+        "raw_note": note[:6000],
+        "structure_source": structure_source,
+        "structure_warning": str(result.get("structure_warning") or "").strip()[:500],
+    }
+
+
+def plan_trend_discovery_queries(knowledge_context, provider_id=None):
+    # 36Kr hot-list data is already current and China-focused. Avoid an extra
+    # LLM planning call that can fail before any public hotspot is fetched.
+    return [
+        "中国 创始人 访谈 商业判断",
+        "中国 科技企业家 公开演讲",
+        "中国 CEO 行业趋势 观点",
+        "中国 消费品牌 创始人 对话",
+    ], ["中国商业热点", "企业家公开发言", "科技与消费趋势"]
+
+
+def is_36kr_url(url):
+    try:
+        host = urllib.parse.urlsplit(str(url or "")).netloc.casefold().split(":", 1)[0]
+    except ValueError:
+        return False
+    return host == "36kr.com" or host.endswith(".36kr.com")
+
+
+class ArticleBodyParser(HTMLParser):
+    """Extract text from common article-body containers without a browser."""
+
+    CONTENT_CLASS_MARKERS = (
+        "article-detail", "article_content", "article-content", "articlecontent",
+        "detail-content", "detail_content", "content-detail", "content_detail",
+        "article-body", "article_body", "post-content", "post_content",
+    )
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.capture_depth = 0
+        self.skip_depth = 0
+        self.chunks = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style", "noscript", "svg"}:
+            self.skip_depth += 1
+            return
+        if self.skip_depth:
+            return
+        class_name = " ".join(value for key, value in attrs if key == "class" and value).casefold()
+        is_article = tag == "article" or any(marker in class_name for marker in self.CONTENT_CLASS_MARKERS)
+        if self.capture_depth:
+            self.capture_depth += 1
+        elif is_article:
+            self.capture_depth = 1
+        if self.capture_depth and tag in {"p", "br", "li", "h1", "h2", "h3", "h4", "blockquote"}:
+            self.chunks.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style", "noscript", "svg"} and self.skip_depth:
+            self.skip_depth -= 1
+            return
+        if self.skip_depth:
+            return
+        if self.capture_depth:
+            if tag in {"p", "div", "section", "article", "li", "h1", "h2", "h3", "h4", "blockquote"}:
+                self.chunks.append("\n")
+            self.capture_depth -= 1
+
+    def handle_data(self, data):
+        if self.capture_depth and not self.skip_depth:
+            self.chunks.append(data)
+
+
+def normalize_article_text(value, limit=18000):
+    text = html.unescape(str(value or ""))
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"[\t\r\f\v ]+", " ", text)
+    lines = []
+    for line in text.split("\n"):
+        line = re.sub(r"\s+", " ", line).strip()
+        if line and (not lines or line != lines[-1]):
+            lines.append(line)
+    return "\n".join(lines)[:limit]
+
+
+def _collect_article_json_text(value, candidates, key_hint=""):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            _collect_article_json_text(child, candidates, str(key).casefold())
+        return
+    if isinstance(value, list):
+        for child in value:
+            _collect_article_json_text(child, candidates, key_hint)
+        return
+    if not isinstance(value, str):
+        return
+    priorities = {
+        "articlebody": 12, "articlecontent": 11, "contenttext": 10,
+        "content": 9, "detail": 8, "body": 7, "description": 4,
+    }
+    priority = priorities.get(key_hint, 0)
+    if not priority:
+        return
+    text = normalize_article_text(value)
+    if len(text) >= 80:
+        candidates.append((priority, len(text), text))
+
+
+def extract_article_body_from_html(page_html):
+    page_html = str(page_html or "")
+    json_candidates = []
+    for script in re.findall(r"<script\b[^>]*>(.*?)</script\s*>", page_html, flags=re.IGNORECASE | re.DOTALL):
+        script = script.strip()
+        if not script or script[0] not in "[{":
+            continue
+        try:
+            _collect_article_json_text(json.loads(script), json_candidates)
+        except ValueError:
+            continue
+    parser = ArticleBodyParser()
+    try:
+        parser.feed(page_html)
+        parser.close()
+    except Exception:
+        pass
+    dom_text = normalize_article_text("".join(parser.chunks))
+    if dom_text and len(dom_text) >= 80:
+        json_candidates.append((10, len(dom_text), dom_text))
+    if not json_candidates:
+        return ""
+    json_candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return json_candidates[0][2]
+
+
+def trend_article_cache_path(url):
+    digest = hashlib.sha256(str(url or "").encode("utf-8")).hexdigest()
+    return TREND_ARTICLE_CACHE_DIR / f"{digest}.json"
+
+
+def source_article_url_candidates(url):
+    """Return equivalent 36Kr article URLs, including the readable regional page."""
+    original = str(url or "").strip()
+    if not original:
+        return []
+    parsed = urllib.parse.urlsplit(original)
+    candidates = [original]
+    path_match = re.match(r"^/p/(\d+)", parsed.path or "")
+    if path_match:
+        article_id = path_match.group(1)
+        candidates.extend([
+            f"https://eu.36kr.com/zh/p/{article_id}",
+            f"https://www.36kr.com/p/{article_id}",
+        ])
+    deduped = []
+    seen = set()
+    for candidate in candidates:
+        key = candidate.rstrip("/")
+        if key not in seen:
+            seen.add(key)
+            deduped.append(candidate)
+    return deduped
+
+
+# Keep the article-rendering fallback on the browser's normal networking,
+# sandbox, and GPU paths. Chromium flags do not change Python socket
+# permissions, so passing bypass flags here only obscures the real diagnosis.
+ARTICLE_BROWSER_LAUNCH_ARGS = ()
+
+
+def fetch_source_article_content_with_browser(urls):
+    """Read a source article in a direct-only Chromium fallback.
+
+    The HTTP path remains the fast path. This fallback is intentionally
+    isolated because Chromium flags do not change Python urllib socket
+    permissions; they only help when the article itself requires rendering.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        site_packages = _publisher_site_packages()
+        if site_packages and site_packages.is_dir() and str(site_packages) not in sys.path:
+            sys.path.insert(0, str(site_packages))
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as nested_exc:
+            raise RuntimeError("正文浏览器兜底需要 Playwright Python 依赖") from nested_exc
+
+    chrome = _chrome_executable()
+    launch_kwargs = {"headless": True}
+    if ARTICLE_BROWSER_LAUNCH_ARGS:
+        launch_kwargs["args"] = list(ARTICLE_BROWSER_LAUNCH_ARGS)
+    if chrome:
+        launch_kwargs["executable_path"] = chrome
+    errors = []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(**launch_kwargs)
+        try:
+            context = browser.new_context(ignore_https_errors=True)
+            try:
+                for candidate_url in urls:
+                    page = context.new_page()
+                    try:
+                        page.goto(candidate_url, wait_until="domcontentloaded", timeout=30000)
+                        try:
+                            page.wait_for_timeout(1200)
+                        except Exception:
+                            pass
+                        content = extract_article_body_from_html(page.content())
+                        if len(content) < 80:
+                            try:
+                                content = normalize_article_text(page.locator("body").inner_text(timeout=5000))
+                            except Exception:
+                                content = ""
+                        if len(content) >= 80:
+                            return {
+                                "content": content,
+                                "resolved_url": candidate_url,
+                                "source": "browser",
+                            }
+                        errors.append(f"{candidate_url}：浏览器页面未返回正文")
+                    except Exception as exc:
+                        errors.append(f"{candidate_url}：{exc}")
+                    finally:
+                        try:
+                            page.close()
+                        except Exception:
+                            pass
+            finally:
+                context.close()
+        finally:
+            browser.close()
+    detail = errors[-1] if errors else "浏览器页面为空"
+    raise RuntimeError(f"浏览器兜底未读取到正文：{detail}")
+
+
+def fetch_source_article_content(url):
+    """Read and cache the source article used to ground video-search anchors."""
+    url = str(url or "").strip()
+    if not is_36kr_url(url):
+        raise RuntimeError("热点缺少可核对的来源报道链接。")
+    cache_path = trend_article_cache_path(url)
+    cached = read_json(cache_path, {})
+    cached_text = normalize_article_text(cached.get("content") if isinstance(cached, dict) else "")
+    if len(cached_text) >= 80:
+        return {"url": url, "content": cached_text, "source": "cache"}
+    errors = []
+    content = ""
+    resolved_url = url
+    for candidate_url in source_article_url_candidates(url):
+        request = urllib.request.Request(
+            candidate_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        )
+        try:
+            with open_public_request(request, timeout=22) as response:
+                page_html = response.read().decode("utf-8", errors="replace")
+            content = extract_article_body_from_html(page_html)
+            if len(content) >= 80:
+                resolved_url = candidate_url
+                break
+            errors.append(f"{candidate_url}：未返回正文")
+        except ExternalNetworkError as exc:
+            errors.append(f"{candidate_url}：{exc}")
+        except (urllib.error.URLError, OSError) as exc:
+            errors.append(f"{candidate_url}：{getattr(exc, 'reason', exc)}")
+    if len(content) < 80:
+        try:
+            browser_result = fetch_source_article_content_with_browser(source_article_url_candidates(url))
+            content = normalize_article_text(browser_result.get("content"))
+            if len(content) >= 80:
+                resolved_url = browser_result.get("resolved_url") or resolved_url
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                write_json(cache_path, {"url": url, "resolved_url": resolved_url, "content": content, "fetched_at": datetime.now().isoformat(timespec="seconds")})
+                return {"url": url, "resolved_url": resolved_url, "content": content, "source": "browser"}
+        except Exception as exc:
+            errors.append(f"浏览器兜底：{exc}")
+        detail = errors[-1] if errors else "返回内容为空"
+        raise RuntimeError(f"无法读取来源报道正文：{detail}")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(cache_path, {"url": url, "resolved_url": resolved_url, "content": content, "fetched_at": datetime.now().isoformat(timespec="seconds")})
+    return {"url": url, "resolved_url": resolved_url, "content": content, "source": "network"}
+
+
+def enrich_hotspots_with_source_articles(selected_hotspots, progress_callback=None):
+    """Attach source-report text to each chosen hotspot before query generation."""
+    selected_hotspots = [item for item in selected_hotspots or [] if isinstance(item, dict)]
+    urls = []
+    title_by_url = {}
+    for hotspot in selected_hotspots:
+        url = str(hotspot.get("source_url") or "").rstrip("/")
+        if not url:
+            raise RuntimeError("所选热点缺少来源报道链接，无法核对检索锚点。")
+        if url not in urls:
+            urls.append(url)
+            title_by_url[url] = str(hotspot.get("title") or "热点")
+    by_url = {}
+    for index, url in enumerate(urls, start=1):
+        if progress_callback:
+            progress_callback(index, len(urls), title_by_url[url])
+        by_url[url] = fetch_source_article_content(url)
+    enriched = []
+    for hotspot in selected_hotspots:
+        url = str(hotspot.get("source_url") or "").rstrip("/")
+        item = dict(hotspot)
+        item["source_article_text"] = by_url[url]["content"]
+        item["source_article_source"] = by_url[url]["source"]
+        enriched.append(item)
+    return enriched
+
+
+def trend_hotlist_dates(start_at="", end_at="", max_days=14):
+    today = datetime.now().date()
+    try:
+        start = datetime.strptime(start_at, "%Y-%m-%d").date() if start_at else today - timedelta(days=6)
+        end = datetime.strptime(end_at, "%Y-%m-%d").date() if end_at else today
+    except ValueError:
+        start, end = today - timedelta(days=6), today
+    end = min(end, today)
+    if start > end:
+        return []
+    if (end - start).days + 1 > max_days:
+        start = end - timedelta(days=max_days - 1)
+    return [start + timedelta(days=offset) for offset in range((end - start).days + 1)]
+
+
+def fetch_36kr_hotlist(day):
+    date_text = day.isoformat()
+    urls = [
+        f"https://openclaw.36krcdn.com/media/hotlist/{date_text}/24h_hot_list.json",
+        f"https://gateway.36kr.com/api/mis/nav/home/nav/rank/hot?partner_id=wap&platform_id=2",
+    ]
+    errors = []
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36", "Accept": "application/json,text/plain,*/*"}
+    for url in urls:
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            with open_public_request(request, timeout=18) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            items = payload.get("data") if isinstance(payload, dict) else []
+            if isinstance(items, dict):
+                items = items.get("items") or items.get("hotList") or items.get("data") or []
+            if not isinstance(items, list):
+                continue
+            normalized = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                article = item.get("item") if isinstance(item.get("item"), dict) else item
+                article = article.get("itemInfo") if isinstance(article.get("itemInfo"), dict) else article
+                normalized.append(article)
+            if normalized:
+                return normalized
+        except (ValueError, urllib.error.URLError, OSError, RuntimeError) as exc:
+            errors.append(str(exc))
+    detail = errors[-1] if errors else "返回内容为空"
+    raise RuntimeError(f"近期热点暂时不可用：{detail}")
+
+
+def load_cached_36kr_sources(start_at="", end_at="", max_age_days=30, max_files=24):
+    """Recover verified 36Kr sources from prior local discovery results."""
+    cutoff = datetime.now().date() - timedelta(days=max_age_days)
+    recovered = []
+    for path in sorted(TRENDS_DIR.glob("trend-*.json"), key=lambda item: item.stat().st_mtime, reverse=True)[:max_files]:
+        result = read_json(path, {})
+        for topic in result.get("topics", []) if isinstance(result, dict) else []:
+            if not isinstance(topic, dict) or not is_36kr_url(topic.get("source_url")):
+                continue
+            published_at = str(topic.get("published_at") or "").strip()
+            published = parse_result_date(published_at)
+            if published and published < cutoff:
+                continue
+            if not in_selected_date_range(published_at, start_at, end_at):
+                continue
+            recovered.append({
+                "title": str(topic.get("source_title") or topic.get("title") or "").strip(),
+                "url": str(topic.get("source_url") or "").strip(),
+                "description": str(topic.get("evidence_excerpt") or topic.get("statement_summary") or "").strip(),
+                "published_at": published_at,
+                "platform": "36Kr",
+                "author": "36Kr",
+                "heat_score": 70,
+                "hot_rank": 99,
+                "source_type": "36kr-cache",
+                "source_name": "36Kr（本地缓存）",
+                "search_query": "36Kr 24 小时热榜（本地缓存）",
+            })
+    deduped = []
+    seen = set()
+    for source in recovered:
+        url = source["url"].rstrip("/")
+        if url in seen or not source["title"]:
+            continue
+        seen.add(url)
+        deduped.append(source)
+    return deduped
+
+
+def fetch_hot_topic_sources(queries, start_at="", end_at="", per_query=8):
+    sources = []
+    warnings = []
+    for day in reversed(trend_hotlist_dates(start_at, end_at)):
+        try:
+            ranked_items = fetch_36kr_hotlist(day)
+            for item in ranked_items[:20]:
+                url = str(item.get("url") or "").strip()
+                title = str(item.get("title") or "").strip()
+                if not title or not is_36kr_url(url):
+                    continue
+                rank = max(1, int(item.get("rank") or 99))
+                published_at = str(item.get("publishTime") or day.isoformat()).strip()
+                source = {
+                    "title": title,
+                    "url": url,
+                    "description": str(item.get("content") or "").strip(),
+                    "published_at": published_at,
+                    "platform": "36Kr",
+                    "author": str(item.get("author") or "").strip(),
+                    "heat_score": max(45, 100 - min(rank, 55)),
+                    "hot_rank": rank,
+                }
+                if not in_selected_date_range(published_at, start_at, end_at):
+                    continue
+                source["source_type"] = "36kr"
+                source["source_name"] = "36Kr"
+                source["search_query"] = "36Kr 24 小时热榜"
+                sources.append(source)
+        except RuntimeError as exc:
+            message = str(exc)
+            warnings.append(message)
+            if "WinError 10013" in message or "外部网络连接" in message:
+                break
+    deduped = []
+    seen = set()
+    for source in sorted(sources, key=lambda item: item.get("heat_score", 0), reverse=True):
+        url = str(source.get("url") or "").rstrip("/")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        deduped.append(source)
+        if len(deduped) >= max(36, per_query * max(1, len(queries))):
+            break
+    if not deduped and warnings:
+        cached = load_cached_36kr_sources(start_at, end_at)
+        if cached:
+            deduped = cached[:max(36, per_query * max(1, len(queries)))]
+            warnings.insert(0, f"实时热点暂时不可连接，已使用最近 {len(deduped)} 条本地缓存热点；请核对来源链接后再制作。")
+    if not deduped and not warnings:
+        warnings.append("当前时间范围内未找到可用的热点报道。")
+    return deduped, warnings
+
+
+CHINESE_PERSON_SURNAMES = "赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜戚谢邹喻柏水窦章云苏潘葛奚范彭郎鲁韦昌马苗凤花方俞任袁柳酆鲍史唐费廉岑薛雷贺倪汤滕殷罗毕郝邬安常乐于傅皮卞齐康伍余元卜顾孟平黄和穆萧尹姚邵湛汪祁毛禹狄米贝明臧计伏成戴谈宋茅庞熊纪舒屈项祝董梁杜阮蓝闵席季麻强贾路娄危江童颜郭梅盛林刁钟徐邱骆高夏蔡田樊胡凌霍虞万支柯昝管卢莫经房裘缪干解应宗丁宣邓郁单杭洪包诸左石崔吉龚程嵇邢滑裴陆荣翁荀羊惠甄曲家封芮羿储靳汲邴糜松井段富巫乌焦巴弓牧隗山谷车侯宓蓬全郗班仰秋仲伊宫宁仇栾暴甘钭厉戎祖武符刘景詹龙叶幸司黎白黑"
+PERSON_ACTION_PATTERN = r"谈|说|称|表示|回应|宣布|发布|分享|提到|提出|认为|指出|现身|出席|会见|任命|卸任|接任|离职|辞任|被查|致歉|道歉|质疑|加入|创业|投资|收购|推出|带队|担任|成为"
+PERSON_ROLE_PATTERN = r"创始人|联合创始人|董事长|CEO|总裁|创办人|董事|首席执行官|负责人|掌门人|投资人|企业家|科学家|导演|演员|歌手|运动员"
+PERSON_NAME_STOP_WORDS = ("公司", "集团", "科技", "汽车", "中国", "美国", "全球", "企业", "市场", "行业", "产品", "品牌", "创始", "董事", "首席", "热点", "商业")
+
+
+def extract_hot_people_from_text(text):
+    """Find explicitly named people in a headline or excerpt without an LLM."""
+    compact = re.sub(r"\s+", "", str(text or ""))
+    if not compact:
+        return []
+    name_pattern = rf"([{CHINESE_PERSON_SURNAMES}][\u4e00-\u9fff]{{1,2}})"
+    matches = []
+    patterns = (
+        rf"{name_pattern}(?=(?:{PERSON_ACTION_PATTERN})|[:：])",
+        rf"(?:{PERSON_ROLE_PATTERN})[，、：: ]*{name_pattern}(?=(?:{PERSON_ACTION_PATTERN})|在|的|就|将|已|曾|亦|与|和|[，。、：:])",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, compact):
+            name = str(match.group(1) or "").strip()
+            if len(name) < 2 or any(word in name for word in PERSON_NAME_STOP_WORDS):
+                continue
+            if name not in matches:
+                matches.append(name)
+    return matches
+
+
+def build_trend_person_pool(start_at="", end_at=""):
+    """Fetch 36Kr over HTTP, then persist the local, reviewable people pool."""
+    sources, warnings = fetch_hot_topic_sources(["36Kr 24 小时热榜"], start_at, end_at)
+    if not sources:
+        raise RuntimeError(warnings[0] if warnings else "未获取到近期 36Kr 中国商业热点，请稍后重试。")
+
+    people_by_name = {}
+    for source in sources:
+        evidence = {
+            "title": str(source.get("title") or "").strip(),
+            "url": str(source.get("url") or "").strip(),
+            "description": str(source.get("description") or "").strip(),
+            "published_at": str(source.get("published_at") or "").strip(),
+            "heat_score": source.get("heat_score") or 0,
+            "hot_rank": source.get("hot_rank") or "",
+            "source_name": str(source.get("source_name") or "36Kr").strip(),
+        }
+        if not evidence["title"] or not is_36kr_url(evidence["url"]):
+            continue
+        for name in extract_hot_people_from_text(f"{evidence['title']}\n{evidence['description']}"):
+            person = people_by_name.setdefault(name, {"name": name, "sources": []})
+            if evidence["url"] not in {item.get("url") for item in person["sources"]}:
+                person["sources"].append(evidence)
+
+    ranked_people = []
+    for person in people_by_name.values():
+        person_sources = sorted(
+            person["sources"],
+            key=lambda item: (float(item.get("heat_score") or 0), str(item.get("published_at") or "")),
+            reverse=True,
+        )
+        ranked_people.append({
+            "name": person["name"],
+            "source_count": len(person_sources),
+            "heat_score": round(sum(float(item.get("heat_score") or 0) for item in person_sources)),
+            "sources": person_sources,
+        })
+    ranked_people.sort(key=lambda item: (-item["heat_score"], -item["source_count"], item["name"]))
+    for index, person in enumerate(ranked_people, start=1):
+        person["person_id"] = f"person-{index:03d}"
+
+    pool_id = f"people-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
+    pool = {
+        "pool_id": pool_id,
+        "provider": "36Kr 热点（HTTP）",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "start_at": start_at,
+        "end_at": end_at,
+        "source_count": len(sources),
+        "people": ranked_people,
+        "warnings": warnings[:8],
+    }
+    write_json(trend_person_pool_path(pool_id), pool)
+    return pool
+
+
+def load_selected_trend_people(pool_id, raw_person_ids):
+    if not str(pool_id or "").startswith("people-"):
+        raise RuntimeError("请先获取 36Kr 候选人物，再生成选题。")
+    pool = read_json(trend_person_pool_path(pool_id), {})
+    if not isinstance(pool, dict) or not isinstance(pool.get("people"), list):
+        raise RuntimeError("候选人物已失效，请重新获取 36Kr 热点。")
+    if isinstance(raw_person_ids, str):
+        raw_person_ids = [raw_person_ids]
+    person_ids = []
+    for person_id in raw_person_ids or []:
+        value = str(person_id or "").strip()
+        if value and value not in person_ids:
+            person_ids.append(value)
+    if not person_ids:
+        raise RuntimeError("请至少选择 1 位候选人物。")
+    if len(person_ids) > 6:
+        raise RuntimeError("最多只能选择 6 位候选人物。")
+
+    people_by_id = {str(person.get("person_id") or ""): person for person in pool["people"] if isinstance(person, dict)}
+    missing = [person_id for person_id in person_ids if person_id not in people_by_id]
+    if missing:
+        raise RuntimeError("部分候选人物已失效，请重新获取 36Kr 热点。")
+    selected_people = [people_by_id[person_id] for person_id in person_ids]
+    selected_sources = {}
+    for person in selected_people:
+        person_id = str(person.get("person_id") or "")
+        person_name = str(person.get("name") or "")
+        for source in person.get("sources") or []:
+            if not isinstance(source, dict):
+                continue
+            url = str(source.get("url") or "").rstrip("/")
+            if not url:
+                continue
+            item = selected_sources.setdefault(url, dict(source, selected_person_ids=[], selected_people=[]))
+            if person_id not in item["selected_person_ids"]:
+                item["selected_person_ids"].append(person_id)
+                item["selected_people"].append(person_name)
+    return pool, selected_people, list(selected_sources.values())
+
+
+def fallback_trend_topic(person, source):
+    name = str(person.get("name") or "候选人物").strip()
+    source_title = str(source.get("title") or "36Kr 热点").strip()
+    return {
+        "topic_id": f"topic-{person.get('person_id')}-{uuid4().hex[:6]}",
+        "person_id": person.get("person_id"),
+        "title": f"{name}：{source_title}"[:120],
+        "category": "36Kr 热点",
+        "speaker_name": name,
+        "speaker_role": "",
+        "statement_summary": str(source.get("description") or source_title).strip()[:300],
+        "heat_reason": "来自用户确认的 36Kr 近期热点人物。",
+        "evidence_excerpt": str(source.get("description") or source_title).strip()[:500],
+        "source_confidence": "medium",
+        "source_title": source_title,
+        "source_url": str(source.get("url") or ""),
+        "source_name": str(source.get("source_name") or "36Kr"),
+        "published_at": str(source.get("published_at") or ""),
+        "material_queries": [f"{name} {source_title[:36]} 完整采访", f"{name} 访谈", f"{name} 演讲"],
+        "recommendation_reason": "已按用户选择的人物保留，等待人工核对。",
+        "query_generation": "fallback",
+        "materials": [],
+    }
+
+
+def choose_trend_topics(sources, knowledge_context, selected_people, provider_id=None):
+    selected_people = [item for item in selected_people or [] if isinstance(item, dict) and item.get("person_id") and item.get("name")]
+    if not selected_people:
+        return []
+    evidence = [
+        {
+            "id": f"source_{index + 1:03d}",
+            "标题": source.get("title", ""),
+            "摘要": source.get("description", ""),
+            "发布时间": source.get("published_at", ""),
+            "链接": source.get("url", ""),
+            "可用人物ID": source.get("selected_person_ids", []),
+            "可用人物": source.get("selected_people", []),
+        }
+        for index, source in enumerate(sources[:36])
+    ]
+    selected_person_payload = [{"person_id": item["person_id"], "name": item["name"]} for item in selected_people]
+    prompt = f"""你是中文商业短视频选题编辑。请只为用户已确认的热点人物生成选题和视频素材检索词。
+必须为“已选人物”中的每个人最多生成 1 条；speaker_name 必须逐字使用该人物的 name，person_id 必须对应同一人。source_id 只能使用其“可用人物ID”中包含该 person_id 的网页证据。不能引入未选择的人物，不能编造原话、来源或视频。每条 material_queries 必须包含该人物姓名，并同时包含来源证据中的具体事件、公司、产品或活动名称；不得只输出“AI”“创业”“商业趋势”等泛词。
+只保留商业、科技、消费、创业议题，并优先原始访谈、演讲、发布会或权威媒体视频。用户知识库只用于轻量排序参考，不能排除用户已选择且有明确 36Kr 证据的人物。
+
+已选人物：
+{json.dumps(selected_person_payload, ensure_ascii=False)}
+
+    用户偏好知识库（只用于轻量排序，不能筛掉已选热点）：
+    {json.dumps((knowledge_context or [])[-6:], ensure_ascii=False)[:6000]}
+
+网页证据：
+{json.dumps(evidence, ensure_ascii=False)[:24000]}
+
+返回 JSON：
+{{
+  "topics": [
+    {{
+      "person_id":"person-001",
+      "source_id":"source_001",
+      "title":"适合做短视频的选题标题",
+      "category":"商业趋势|企业家访谈|科技判断|消费洞察",
+      "speaker_name":"证据中出现的人物姓名",
+      "speaker_role":"人物身份",
+      "statement_summary":"仅根据证据摘要概括人物的观点；不是逐字引用",
+      "heat_reason":"为什么值得关注",
+      "evidence_excerpt":"从输入摘要中摘取或忠实压缩，不超过100字",
+      "source_confidence":"high|medium",
+      "material_queries":["人物 具体事件 完整采访", "人物 具体事件 演讲", "人物 具体事件 发布会"],
+      "recommendation_reason":"与用户历史主题的匹配原因"
+    }}
+  ]
+}}"""
+    result = llm_json(prompt, provider_id=provider_id, max_tokens=6000)
+    source_by_id = {item["id"]: item for item in evidence}
+    people_by_id = {str(item["person_id"]): item for item in selected_people}
+    topics_by_person_id = {}
+    for item in result.get("topics", []) if isinstance(result.get("topics"), list) else []:
+        source = source_by_id.get(str(item.get("source_id") or ""))
+        person_id = str(item.get("person_id") or "").strip()
+        person = people_by_id.get(person_id)
+        source_url = str(source.get("链接") or "") if source else ""
+        if not source or not person or person_id in topics_by_person_id or not is_36kr_url(source_url):
+            continue
+        if person_id not in set(source.get("可用人物ID") or []):
+            continue
+        speaker = str(person.get("name") or "").strip()
+        query_anchor_source = {"entities": [speaker], "title": source.get("标题") or "热点事件", "source_title": source.get("标题") or "热点事件"}
+        queries = enforce_hotspot_query_anchors(query_anchor_source, item.get("material_queries"), limit=3)
+        if not queries:
+            queries = [f"{speaker} 访谈", f"{speaker} 演讲", f"{speaker} 发布会"]
+        topics_by_person_id[person_id] = {
+            "topic_id": f"topic-{person_id}-{uuid4().hex[:6]}",
+            "person_id": person_id,
+            "title": str(item.get("title") or source["标题"]).strip()[:120],
+            "category": str(item.get("category") or "商业观点").strip()[:40],
+            "speaker_name": speaker[:60],
+            "speaker_role": str(item.get("speaker_role") or "").strip()[:80],
+            "statement_summary": str(item.get("statement_summary") or "").strip()[:300],
+            "heat_reason": str(item.get("heat_reason") or "").strip()[:200],
+            "evidence_excerpt": str(item.get("evidence_excerpt") or source["摘要"]).strip()[:500],
+            "source_confidence": "high" if str(item.get("source_confidence")).lower() == "high" else "medium",
+            "source_title": source["标题"],
+            "source_url": source_url,
+            "source_name": "36Kr",
+            "published_at": source["发布时间"],
+            "material_queries": queries,
+            "search_anchors": [speaker],
+            "recommendation_reason": str(item.get("recommendation_reason") or "").strip()[:240],
+            "query_generation": "llm",
+            "materials": [],
+        }
+    for person in selected_people:
+        person_id = str(person["person_id"])
+        if person_id in topics_by_person_id:
+            continue
+        matching_source = next((source for source in sources if person_id in set(source.get("selected_person_ids") or [])), None)
+        if matching_source:
+            topics_by_person_id[person_id] = fallback_trend_topic(person, matching_source)
+    return [topics_by_person_id[str(person["person_id"])] for person in selected_people if str(person["person_id"]) in topics_by_person_id]
+
+
+def build_trend_hotspot_pool(start_at="", end_at="", provider_id=None, progress_callback=None):
+    """Fetch 36Kr by HTTP, then ask the LLM to split mixed reports into hotspots."""
+    def report(progress, message):
+        if progress_callback:
+            progress_callback(max(0.0, min(0.99, float(progress))), message)
+
+    report(0.06, "正在获取近期热点报道")
+    sources, warnings = fetch_hot_topic_sources(["36Kr 24 小时热榜"], start_at, end_at)
+    if not sources:
+        raise RuntimeError(warnings[0] if warnings else "未获取到近期热点，请稍后重试。")
+
+    report(0.28, f"已获取 {len(sources)} 条近期报道，正在整理可核对证据")
+    evidence = []
+    # The selection UI allows at most ten choices. Keeping the initial LLM
+    # batch focused avoids a long, opaque wait on large multi-day hotlists.
+    for index, source in enumerate(sources[:24], start=1):
+        title = str(source.get("title") or "").strip()
+        url = str(source.get("url") or "").strip()
+        if not title or not is_36kr_url(url):
+            continue
+        evidence.append({
+            "source_id": f"source_{index:03d}",
+            "标题": title,
+            "摘要": str(source.get("description") or "").strip(),
+            "发布时间": str(source.get("published_at") or "").strip(),
+            "热度": source.get("heat_score") or 0,
+            "链接": url,
+            "来源": str(source.get("source_name") or "36Kr").strip(),
+        })
+    if not evidence:
+        raise RuntimeError("热点报道未返回可核对的文章链接。")
+
+    report(0.46, f"正在由 AI 拆分 {len(evidence)} 条报道中的独立热点")
+    prompt = f"""你是中文商业热点编辑。下面是 36Kr 热榜的标题和摘要；一篇报道可能把多个独立新闻、公司动态或人物事件拼在一起。
+请逐篇拆分成可单独制作短视频、可单独检索视频素材的“独立热点”。热点不要求是名人事件，可以是公司、产品、融资、政策、行业变化、发布会或争议；但必须能完全从输入证据中核对，不能补写或猜测事实。
+每条热点必须只对应一个 source_id；同一 source_id 最多拆 2 条。排除没有明确事实主体的泛泛评论、广告文案和重复热点。尽量保留输入中出现的明确主体、动作和时间线。总计最多返回 40 条。
+
+36Kr 证据：
+{json.dumps(evidence, ensure_ascii=False)[:36000]}
+
+返回严格 JSON：
+{{
+  "hotspots": [
+    {{
+      "source_id":"source_001",
+      "title":"独立热点标题",
+      "category":"公司动态|产品发布|融资并购|行业趋势|政策监管|人物事件|消费市场|其他",
+      "summary":"仅根据原文摘要整理的热点事实，不超过180字",
+      "why_hot":"该热点值得进一步检索视频素材的原因，不超过100字",
+      "evidence_excerpt":"从输入标题或摘要摘取/忠实压缩，不超过120字",
+      "entities":["原文中明确出现的公司、产品、人物或事件主体，2至5项"]
+    }}
+  ]
+    }}"""
+    split_result = {}
+    split_finished = threading.Event()
+
+    def split_hotspots_with_llm():
+        try:
+            split_result["response"] = llm_json(prompt, provider_id=provider_id, max_tokens=4800)
+        except BaseException as exc:
+            split_result["error"] = exc
+        finally:
+            split_finished.set()
+
+    threading.Thread(target=split_hotspots_with_llm, daemon=True).start()
+    waiting_progress = 0.46
+    while not split_finished.wait(2.5):
+        waiting_progress = min(0.72, waiting_progress + 0.02)
+        report(waiting_progress, f"正在由 AI 拆分 {len(evidence)} 条报道中的独立热点（模型处理中）")
+    if "error" in split_result:
+        raise split_result["error"]
+    response = split_result.get("response") or {}
+    report(0.78, "AI 已返回拆分结果，正在核对来源证据")
+    source_by_id = {item["source_id"]: item for item in evidence}
+    per_source_count = {}
+    seen = set()
+    hotspots = []
+    for item in response.get("hotspots", []) if isinstance(response.get("hotspots"), list) else []:
+        source_id = str(item.get("source_id") or "").strip()
+        source = source_by_id.get(source_id)
+        title = str(item.get("title") or "").strip()
+        key = re.sub(r"\s+", "", title).casefold()
+        if not source or len(title) < 4 or key in seen or per_source_count.get(source_id, 0) >= 2:
+            continue
+        entities = safe_string_list(item.get("entities"), limit=5, item_limit=60)
+        hotspots.append({
+            "hotspot_id": f"hotspot-{len(hotspots) + 1:03d}",
+            "source_id": source_id,
+            "title": title[:140],
+            "category": str(item.get("category") or "其他").strip()[:40],
+            "summary": str(item.get("summary") or source["摘要"]).strip()[:300],
+            "why_hot": str(item.get("why_hot") or "来自近期 36Kr 热榜报道。").strip()[:160],
+            "evidence_excerpt": str(item.get("evidence_excerpt") or source["摘要"] or source["标题"]).strip()[:500],
+            "entities": entities,
+            "source_title": source["标题"],
+            "source_url": source["链接"],
+            "source_name": source["来源"],
+            "published_at": source["发布时间"],
+            "heat_score": source["热度"],
+        })
+        seen.add(key)
+        per_source_count[source_id] = per_source_count.get(source_id, 0) + 1
+        if len(hotspots) >= 40:
+            break
+    if not hotspots:
+        raise RuntimeError("AI 未能从当前报道中拆出可核对的独立热点。")
+
+    pool_id = f"hotspots-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
+    pool = {
+        "pool_id": pool_id,
+        "provider": "热点发现",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "start_at": start_at,
+        "end_at": end_at,
+        "source_count": len(sources),
+        "hotspots": hotspots,
+        "warnings": warnings[:8],
+    }
+    write_json(trend_hotspot_pool_path(pool_id), pool)
+    report(0.97, f"已保存 {len(hotspots)} 条候选热点")
+    return pool
+
+
+def load_selected_trend_hotspots(pool_id, raw_hotspot_ids, max_selection=10):
+    if not str(pool_id or "").startswith("hotspots-"):
+        raise RuntimeError("请先获取并拆分 36Kr 候选热点，再生成检索词。")
+    pool = read_json(trend_hotspot_pool_path(pool_id), {})
+    if not isinstance(pool, dict) or not isinstance(pool.get("hotspots"), list):
+        raise RuntimeError("候选热点已失效，请重新获取 36Kr 热点。")
+    if isinstance(raw_hotspot_ids, str):
+        raw_hotspot_ids = [raw_hotspot_ids]
+    hotspot_ids = []
+    for hotspot_id in raw_hotspot_ids or []:
+        value = str(hotspot_id or "").strip()
+        if value and value not in hotspot_ids:
+            hotspot_ids.append(value)
+    if not hotspot_ids:
+        raise RuntimeError("请至少选择 1 条候选热点。")
+    if len(hotspot_ids) > max_selection:
+        raise RuntimeError(f"最多只能选择 {max_selection} 条候选热点。")
+    hotspots_by_id = {str(item.get("hotspot_id") or ""): item for item in pool["hotspots"] if isinstance(item, dict)}
+    missing = [hotspot_id for hotspot_id in hotspot_ids if hotspot_id not in hotspots_by_id]
+    if missing:
+        raise RuntimeError("部分候选热点已失效，请重新获取 36Kr 热点。")
+    return pool, [hotspots_by_id[hotspot_id] for hotspot_id in hotspot_ids]
+
+
+def fallback_hotspot_topic(hotspot):
+    title = str(hotspot.get("title") or "36Kr 热点").strip()
+    entities = hotspot_search_anchors(hotspot, limit=5)
+    match_terms = entities or [title[:30]]
+    material_queries = []
+    if entities:
+        material_queries = enforce_hotspot_query_anchors(
+            hotspot,
+            [f"{hotspot_query_subject(hotspot, entities)} 新闻现场", f"{hotspot_query_subject(hotspot, entities)} 发布会", f"{hotspot_query_subject(hotspot, entities)} 权威报道"],
+        )
+    return {
+        "topic_id": f"topic-{hotspot.get('hotspot_id')}-{uuid4().hex[:6]}",
+        "hotspot_id": hotspot.get("hotspot_id"),
+        "title": title[:140],
+        "category": str(hotspot.get("category") or "36Kr 热点")[:40],
+        "subject_label": "、".join(entities[:3]) or "热点主体待核对",
+        "statement_summary": str(hotspot.get("summary") or title).strip()[:300],
+        "heat_reason": str(hotspot.get("why_hot") or "来自用户确认的 36Kr 近期热点。").strip()[:200],
+        "evidence_excerpt": str(hotspot.get("evidence_excerpt") or title).strip()[:500],
+        "source_confidence": "medium",
+        "source_title": str(hotspot.get("source_title") or title),
+        "source_url": str(hotspot.get("source_url") or ""),
+        "source_name": str(hotspot.get("source_name") or "36Kr"),
+        "published_at": str(hotspot.get("published_at") or ""),
+        "material_queries": material_queries,
+        "match_terms": match_terms,
+        "search_anchors": entities,
+        "recommendation_reason": "已按用户选择的热点保留，等待人工核对。" if entities else "来源报道中未能确认可用于检索的主体锚点，未执行泛词搜索。",
+        "query_generation": "fallback" if entities else "anchor_missing",
+        "materials": [],
+    }
+
+
+def generate_trend_topics_from_hotspots(selected_hotspots, knowledge_context, provider_id=None):
+    selected_hotspots = [item for item in selected_hotspots or [] if isinstance(item, dict) and item.get("hotspot_id")]
+    if not selected_hotspots:
+        return []
+    evidence = [
+        {
+            "hotspot_id": item["hotspot_id"],
+            "热点": item.get("title", ""),
+            "分类": item.get("category", ""),
+            "摘要": item.get("summary", ""),
+            "证据摘录": item.get("evidence_excerpt", ""),
+            "主体": item.get("entities", []),
+            "已核对锚点": hotspot_search_anchors(item),
+            "原报道正文": str(item.get("source_article_text") or "")[:12000],
+            "来源标题": item.get("source_title", ""),
+            "来源链接": item.get("source_url", ""),
+        }
+        for item in selected_hotspots
+    ]
+    prompt = f"""你是中文短视频素材检索编辑。用户已确认下列独立热点；请只为这些热点逐条生成可用于视频素材搜索的检索词。
+每个 hotspot_id 最多输出 1 条，必须覆盖每一个输入热点。不能引入未选择的热点、人物或事实。每条 material_queries 必须根据“原报道正文”生成，不能只根据热点标题、摘要或泛概念生成。
+先从原报道正文中找出明确出现的公司名、人物名、产品名、项目名、活动名或机构名，写入 verified_anchors。每个 verified_anchors 必须能在原报道正文逐字找到；有 2 个及以上锚点时，每条 material_queries 至少包含其中 2 个；只有 1 个锚点时，每条必须包含它。不得只输出“AI 治疗癌症”“机器人”“新能源”等泛概念词。
+例如，若原报道正文包含 Moderna、默沙东、intismeran autogene，则应写成“Moderna 默沙东 intismeran autogene 黑色素瘤 III期临床试验”一类可追溯的查询，而不是“AI 治疗癌症”。检索词应保留原报道中已核对的主体和具体事件，并优先适合寻找新闻现场、发布会、产品演示、采访、权威媒体报道等公开视频；热点不要求有名人。
+知识库只用于轻量排序，不得排除用户已选择的热点。
+
+用户偏好知识库：
+{json.dumps(compact_trend_knowledge_context(), ensure_ascii=False)[:6000]}
+
+已选热点证据：
+{json.dumps(evidence, ensure_ascii=False)[:18000]}
+
+返回严格 JSON：
+{{
+  "topics": [
+    {{
+      "hotspot_id":"hotspot-001",
+      "title":"适合短视频的选题标题",
+      "category":"与输入热点一致或更具体的分类",
+      "subject_label":"公司/产品/人物/事件主体，最多3项",
+      "statement_summary":"只根据输入概括热点事实，不超过200字",
+      "heat_reason":"为什么值得做，不超过100字",
+      "evidence_excerpt":"只摘取或忠实压缩输入证据，不超过120字",
+       "source_confidence":"high|medium",
+       "verified_anchors":["原报道正文中逐字出现的公司、人名、产品、活动或机构名称，2至5项"],
+       "material_queries":["主体 事件 新闻现场", "主体 事件 发布会", "主体 事件 权威报道"],
+      "match_terms":["用于判断视频是否相关的明确主体或关键词，2至5项"],
+      "recommendation_reason":"与用户偏好的轻量匹配原因"
+    }}
+  ]
+}}"""
+    response = llm_json(prompt, provider_id=provider_id, max_tokens=7000)
+    hotspots_by_id = {str(item["hotspot_id"]): item for item in selected_hotspots}
+    topics_by_hotspot_id = {}
+    for item in response.get("topics", []) if isinstance(response.get("topics"), list) else []:
+        hotspot_id = str(item.get("hotspot_id") or "").strip()
+        hotspot = hotspots_by_id.get(hotspot_id)
+        if not hotspot or hotspot_id in topics_by_hotspot_id:
+            continue
+        verified_context = dict(hotspot, verified_anchors=item.get("verified_anchors"))
+        anchors = hotspot_search_anchors(verified_context, limit=5)
+        queries = enforce_hotspot_query_anchors(verified_context, item.get("material_queries"), limit=3)
+        match_terms = safe_string_list(item.get("match_terms"), limit=5, item_limit=60)
+        if not anchors or not queries or not match_terms:
+            topics_by_hotspot_id[hotspot_id] = fallback_hotspot_topic(hotspot)
+            continue
+        topics_by_hotspot_id[hotspot_id] = {
+            "topic_id": f"topic-{hotspot_id}-{uuid4().hex[:6]}",
+            "hotspot_id": hotspot_id,
+            "title": str(item.get("title") or hotspot["title"]).strip()[:140],
+            "category": str(item.get("category") or hotspot.get("category") or "36Kr 热点").strip()[:40],
+            "subject_label": str(item.get("subject_label") or "、".join(anchors or hotspot.get("entities") or [])).strip()[:100],
+            "statement_summary": str(item.get("statement_summary") or hotspot.get("summary") or "").strip()[:300],
+            "heat_reason": str(item.get("heat_reason") or hotspot.get("why_hot") or "").strip()[:200],
+            "evidence_excerpt": str(item.get("evidence_excerpt") or hotspot.get("evidence_excerpt") or "").strip()[:500],
+            "source_confidence": "high" if str(item.get("source_confidence")).lower() == "high" else "medium",
+            "source_title": str(hotspot.get("source_title") or hotspot["title"]),
+            "source_url": str(hotspot.get("source_url") or ""),
+            "source_name": str(hotspot.get("source_name") or "36Kr"),
+            "published_at": str(hotspot.get("published_at") or ""),
+            "material_queries": queries,
+            "match_terms": merge_search_terms(anchors, match_terms, limit=6),
+            "search_anchors": anchors,
+            "source_article_excerpt": normalize_article_text(hotspot.get("source_article_text"), limit=1800),
+            "source_article_source": str(hotspot.get("source_article_source") or ""),
+            "recommendation_reason": str(item.get("recommendation_reason") or "").strip()[:240],
+            "query_generation": "llm",
+            "materials": [],
+        }
+    for hotspot in selected_hotspots:
+        hotspot_id = str(hotspot["hotspot_id"])
+        if hotspot_id not in topics_by_hotspot_id:
+            topics_by_hotspot_id[hotspot_id] = fallback_hotspot_topic(hotspot)
+    return [topics_by_hotspot_id[str(item["hotspot_id"])] for item in selected_hotspots]
+
+
+def material_candidate_quality(candidate, topic):
+    haystack = " ".join(str(candidate.get(key) or "") for key in ("title", "description", "author")).casefold()
+    speaker = str(topic.get("speaker_name") or "").casefold()
+    search_anchors = safe_string_list(topic.get("search_anchors"), limit=5, item_limit=80)
+    match_terms = safe_string_list(topic.get("match_terms"), limit=6, item_limit=60)
+    if speaker and speaker not in match_terms:
+        match_terms.insert(0, speaker)
+    normalized_terms = [term.casefold() for term in match_terms if len(term.strip()) >= 2]
+    normalized_anchors = [term.casefold() for term in search_anchors if len(term.strip()) >= 2]
+    score = float(candidate.get("heat_score") or 0)
+    reasons = []
+    matched_terms = [term for term in normalized_terms if term in haystack]
+    matched_anchors = [term for term in normalized_anchors if term in haystack]
+    topic_matched = bool(matched_anchors) if normalized_anchors else bool(matched_terms)
+    if topic_matched:
+        score += 30
+        if speaker and speaker in haystack:
+            reasons.append("标题或简介包含目标人物")
+        elif matched_anchors:
+            reasons.append(f"标题或简介包含热点主体：{matched_anchors[0]}")
+        else:
+            reasons.append(f"标题或简介包含热点关键词：{matched_terms[0]}")
+    else:
+        score -= 40
+        reasons.append("未能确认热点主体或关键词")
+    if re.search(r"采访|访谈|专访|对话|演讲|发布会|现场|完整", haystack):
+        score += 16
+        reasons.append("更接近原始发言场景")
+    if re.search(r"解读|鸡汤|励志|文案|语录|混剪|搬运", haystack):
+        score -= 28
+        reasons.append("可能是二次创作")
+    score = max(0, min(100, round(score)))
+    grade = "A" if score >= 82 else "B" if score >= 62 else "C"
+    return score, grade, "；".join(reasons) or "基于公开互动和主题匹配筛选", topic_matched
+
+
+def append_topic_material(topic, candidate):
+    score, grade, reason, topic_matched = material_candidate_quality(candidate, topic)
+    if not topic_matched:
+        return
+    material = dict(candidate)
+    material["material_score"] = score
+    material["source_grade"] = grade
+    material["material_reason"] = reason
+    material["trend_topic_id"] = topic["topic_id"]
+    material["trend_topic_title"] = topic["title"]
+    topic["materials"].append(material)
+
+
+def dedupe_topic_materials(topics, material_limit):
+    for topic in topics:
+        deduped = []
+        seen_urls = set()
+        for candidate in sorted(topic["materials"], key=lambda item: item.get("material_score", 0), reverse=True):
+            url = str(candidate.get("url") or "").rstrip("/")
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            deduped.append(candidate)
+            if len(deduped) >= material_limit:
+                break
+        topic["materials"] = deduped
+
+
+def collect_trend_materials(
+    topics,
+    platforms,
+    material_limit,
+    start_at="",
+    end_at="",
+    target_count=None,
+    progress_callback=None,
+    progress_start=0.45,
+    progress_end=0.90,
+):
+    warnings = []
+    max_attempts = max((len(topic.get("material_queries") or []) for topic in topics), default=0)
+    total_operations = max(1, max_attempts * max(1, len(topics)) * max(1, len(platforms)))
+    completed_operations = 0
+    for query_index in range(max_attempts):
+        for topic in topics:
+            if topic.get("materials"):
+                continue
+            if target_count and len(topics_with_materials(topics)) >= target_count:
+                return warnings
+            queries = topic.get("material_queries") or []
+            if query_index >= len(queries):
+                continue
+            query = str(queries[query_index] or "").strip()
+            if not query:
+                continue
+            # Query one topic at a time: a slow or blocked platform request must
+            # not hold every other topic hostage, and we can stop as soon as the
+            # requested number of material-backed topics is ready.
+            for platform in platforms:
+                completed_operations += 1
+                if progress_callback:
+                    ratio = min(1.0, completed_operations / total_operations)
+                    progress_callback(
+                        progress_start + (progress_end - progress_start) * ratio,
+                        f"正在搜索视频素材：{topic.get('subject_label') or topic.get('speaker_name') or topic.get('title') or '候选热点'} · {completed_operations}/{total_operations}",
+                    )
+                try:
+                    _, candidates, platform_warnings = search_media_crawler_candidates(
+                        [query], platform, max(12, material_limit * 4), start_at, end_at
+                    )
+                    warnings.extend(platform_warnings)
+                except RuntimeError as exc:
+                    warnings.append(f"{media_crawler_platform_label(platform)} 素材检索失败：{exc}")
+                    continue
+                for candidate in candidates:
+                    append_topic_material(topic, candidate)
+                dedupe_topic_materials([topic], material_limit)
+                if topic.get("materials"):
+                    break
+    return warnings
+
+
+def topics_with_materials(topics):
+    return [topic for topic in topics if topic.get("materials")]
+
+
+def discover_selected_trend_hotspots(payload, progress_callback=None):
+    """Generate queries and source footage only for user-approved split hotspots."""
+    def report(progress, message):
+        if progress_callback:
+            progress_callback(max(0.0, min(0.99, float(progress))), message)
+
+    payload = payload or {}
+    report(0.03, "正在读取轻量选题偏好")
+    knowledge_context = trend_knowledge_context()
+    start_at = str(payload.get("start_at") or "").strip()
+    end_at = str(payload.get("end_at") or "").strip()
+    platforms = [item for item in (payload.get("platforms") or ["bili", "dy"]) if item in {"bili", "dy"}]
+    if not platforms:
+        platforms = ["bili", "dy"]
+    pool, selected_hotspots = load_selected_trend_hotspots(
+        payload.get("hotspot_pool_id"), payload.get("hotspot_ids")
+    )
+    report(0.08, f"已确认 {len(selected_hotspots)} 条热点，正在读取来源报道")
+
+    def report_source_read(index, total, title):
+        progress = 0.08 + 0.10 * (index / max(1, total))
+        report(progress, f"正在核对来源报道 {index}/{total}：{title[:36]}")
+
+    selected_hotspots = enrich_hotspots_with_source_articles(
+        selected_hotspots, progress_callback=report_source_read
+    )
+    report(0.20, f"已核对 {len(selected_hotspots)} 条来源报道，正在生成检索词")
+    topics = generate_trend_topics_from_hotspots(
+        selected_hotspots, knowledge_context, provider_id=payload.get("provider_id")
+    )
+    if not topics:
+        raise RuntimeError("AI 未能为所选热点生成检索词，请稍后重试。")
+
+    report(0.42, "正在根据所选热点搜索视频素材")
+    warnings = list(pool.get("warnings") or [])
+    warnings.extend(collect_trend_materials(
+        topics,
+        platforms,
+        material_limit=3,
+        target_count=None,
+        progress_callback=progress_callback,
+        progress_start=0.44,
+        progress_end=0.93,
+    ))
+    material_topic_count = len(topics_with_materials(topics))
+    summary_warning = (
+        f"已为 {len(topics)} 条所选热点生成检索词，其中 {material_topic_count} 条找到视频素材；"
+        "未找到素材的热点仍会保留供人工核对。"
+    )
+    warnings.insert(0, summary_warning)
+    fallback_topics = [topic for topic in topics if topic.get("query_generation") == "fallback"]
+    if fallback_topics:
+        warnings.append(f"AI 未返回 {len(fallback_topics)} 条热点的完整结构化结果，已保留默认检索词。")
+
+    flat_candidates = [candidate for topic in topics for candidate in topic.get("materials", [])]
+    report(0.98, f"正在整理 {len(topics)} 条选题和视频素材")
+    search_id = f"trend-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
+    result = {
+        "search_id": search_id,
+        "provider": "视频素材搜索",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "start_at": start_at,
+        "end_at": end_at,
+        "knowledge_count": len(knowledge_context),
+        "hotspot_pool_id": pool.get("pool_id"),
+        "selected_hotspots": [
+            {"hotspot_id": hotspot.get("hotspot_id"), "title": hotspot.get("title")}
+            for hotspot in selected_hotspots
+        ],
+        "generated_queries": [query for topic in topics for query in topic.get("material_queries") or []],
+        "editorial_focus": [hotspot.get("title") for hotspot in selected_hotspots],
+        "requested_count": len(selected_hotspots),
+        "source_count": int(pool.get("source_count") or 0),
+        "topics": topics,
+        "candidates": flat_candidates,
+        "warnings": warnings[:8],
+    }
+    write_json(trend_search_path(search_id), result)
+    return result
+
+
+def discover_ai_trends(payload, progress_callback=None):
+    payload = payload or {}
+    if payload.get("hotspot_pool_id"):
+        return discover_selected_trend_hotspots(payload, progress_callback=progress_callback)
+
+    def report(progress, message):
+        if progress_callback:
+            progress_callback(max(0.0, min(0.99, float(progress))), message)
+
+    report(0.03, "正在读取轻量选题偏好")
+    knowledge_context = trend_knowledge_context()
+    start_at = str(payload.get("start_at") or "").strip()
+    end_at = str(payload.get("end_at") or "").strip()
+    platforms = [item for item in (payload.get("platforms") or ["bili", "dy"]) if item in {"bili", "dy"}]
+    if not platforms:
+        platforms = ["bili", "dy"]
+    pool, selected_people, sources = load_selected_trend_people(payload.get("person_pool_id"), payload.get("person_ids"))
+    if not sources:
+        raise RuntimeError("所选人物缺少可用的 36Kr 热点证据，请重新获取候选人物。")
+    report(0.18, f"已确认 {len(selected_people)} 位人物，正在生成选题和检索词")
+    topics = choose_trend_topics(sources, knowledge_context, selected_people, provider_id=payload.get("provider_id"))
+    if not topics:
+        raise RuntimeError("AI 未能为所选人物生成选题，请稍后重试。")
+    # Hotness belongs to the 36Kr article date. Source footage can be an earlier
+    # interview, speech, or launch video for the same verified person, so do not
+    # discard it merely because it predates the news window.
+    report(0.42, "正在根据所选人物搜索视频素材")
+    warnings = list(pool.get("warnings") or [])
+    warnings.extend(collect_trend_materials(
+        topics,
+        platforms,
+        material_limit=3,
+        target_count=None,
+        progress_callback=progress_callback,
+        progress_start=0.44,
+        progress_end=0.93,
+    ))
+    selected_topics = topics
+    cache_warning = next((warning for warning in warnings if "本地缓存" in warning), "")
+    material_topic_count = len(topics_with_materials(selected_topics))
+    summary_warning = f"已为 {len(selected_topics)} 位所选人物生成选题，其中 {material_topic_count} 位找到匹配视频素材；未找到素材的选题仍会保留供人工核对。"
+    warnings.insert(0, summary_warning)
+    if cache_warning:
+        warnings.remove(cache_warning)
+        warnings.insert(1, cache_warning)
+    fallback_people = [topic.get("speaker_name") for topic in selected_topics if topic.get("query_generation") == "fallback"]
+    if fallback_people:
+        warnings.append(f"AI 未返回 {len(fallback_people)} 位人物的完整结构化结果，已保留默认检索词：{'、'.join(fallback_people)}。")
+    flat_candidates = [candidate for topic in selected_topics for candidate in topic.get("materials", [])]
+    report(0.98, f"正在整理 {len(selected_topics)} 条选题和视频素材")
+    search_id = f"trend-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
+    result = {
+        "search_id": search_id,
+        "provider": "视频素材搜索",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "start_at": start_at,
+        "end_at": end_at,
+        "knowledge_count": len(knowledge_context),
+        "person_pool_id": pool.get("pool_id"),
+        "selected_people": [{"person_id": person.get("person_id"), "name": person.get("name")} for person in selected_people],
+        "generated_queries": [query for topic in selected_topics for query in topic.get("material_queries") or []],
+        "editorial_focus": [person.get("name") for person in selected_people],
+        "requested_count": len(selected_people),
+        "source_count": len(sources),
+        "topics": selected_topics,
+        "candidates": flat_candidates,
+        "warnings": warnings[:8],
+    }
+    write_json(trend_search_path(search_id), result)
+    return result
+
+
+def trend_discovery_worker(task_id, payload):
+    try:
+        set_trend_task(
+            task_id,
+            status="running",
+            stage="discovering",
+            progress=0.01,
+            message="正在启动 AI 爆款发现",
+            started_at=datetime.now().isoformat(timespec="seconds"),
+        )
+
+        def update_progress(progress, message):
+            set_trend_task(task_id, status="running", stage="discovering", progress=progress, message=message)
+
+        result = discover_ai_trends(payload, progress_callback=update_progress)
+        topics = result.get("topics") or []
+        material_topic_count = len(topics_with_materials(topics))
+        set_trend_task(
+            task_id,
+            status="done",
+            stage="done",
+            progress=1,
+            message=(
+                f"发现完成：已生成 {len(topics)}/{result.get('requested_count') or len(topics)} 条"
+                f"{'热点' if result.get('selected_hotspots') else '人物'}选题，其中 {material_topic_count} 条找到素材"
+            ),
+            search_id=result.get("search_id"),
+            requested_count=result.get("requested_count"),
+            topic_count=len(topics),
+            candidate_count=len(result.get("candidates") or []),
+        )
+    except Exception as exc:
+        set_trend_task(
+            task_id,
+            status="error",
+            stage="error",
+            progress=0,
+            message=str(exc),
+            error=str(exc),
+        )
+    finally:
+        global ACTIVE_TREND_DISCOVERY_TASK_ID
+        with TREND_DISCOVERY_LOCK:
+            if ACTIVE_TREND_DISCOVERY_TASK_ID == task_id:
+                ACTIVE_TREND_DISCOVERY_TASK_ID = None
+
+
+def start_trend_discovery(payload):
+    global ACTIVE_TREND_DISCOVERY_TASK_ID
+    payload = payload or {}
+    raw_person_ids = payload.get("person_ids", [])
+    if isinstance(raw_person_ids, str):
+        raw_person_ids = [raw_person_ids]
+    person_ids = [str(item).strip() for item in raw_person_ids if str(item).strip()][:6]
+    raw_hotspot_ids = payload.get("hotspot_ids", [])
+    if isinstance(raw_hotspot_ids, str):
+        raw_hotspot_ids = [raw_hotspot_ids]
+    hotspot_ids = [str(item).strip() for item in raw_hotspot_ids if str(item).strip()]
+    with TREND_DISCOVERY_LOCK:
+        active_task = get_trend_task(ACTIVE_TREND_DISCOVERY_TASK_ID) if ACTIVE_TREND_DISCOVERY_TASK_ID else {}
+        if active_task.get("status") in {"queued", "running"}:
+            return active_task
+        task_id = f"trend-discover-{uuid4().hex[:12]}"
+        task = set_trend_task(
+            task_id,
+            kind="discovery",
+            status="queued",
+            stage="queued",
+            progress=0,
+            person_ids=person_ids,
+            hotspot_ids=hotspot_ids,
+            message="已加入 AI 爆款发现队列",
+            created_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        ACTIVE_TREND_DISCOVERY_TASK_ID = task_id
+    threading.Thread(
+        target=trend_discovery_worker,
+        args=(task_id, dict(payload)),
+        daemon=True,
+    ).start()
+    return task
+
+
+def trend_hotspot_pool_worker(task_id, payload):
+    try:
+        set_trend_task(
+            task_id,
+            status="running",
+            stage="fetching_hotspots",
+            progress=0.01,
+            progress_label="热点拆分进度",
+            message="正在启动热点获取",
+            started_at=datetime.now().isoformat(timespec="seconds"),
+        )
+
+        def update_progress(progress, message):
+            set_trend_task(
+                task_id,
+                status="running",
+                stage="fetching_hotspots",
+                progress=progress,
+                progress_label="热点拆分进度",
+                message=message,
+            )
+
+        pool = build_trend_hotspot_pool(
+            str(payload.get("start_at") or "").strip(),
+            str(payload.get("end_at") or "").strip(),
+            provider_id=payload.get("provider_id"),
+            progress_callback=update_progress,
+        )
+        set_trend_task(
+            task_id,
+            status="done",
+            stage="done",
+            progress=1,
+            progress_label="热点拆分进度",
+            message=f"热点拆分完成：已得到 {len(pool.get('hotspots') or [])} 条候选热点",
+            pool=pool,
+            pool_id=pool.get("pool_id"),
+            source_count=pool.get("source_count") or 0,
+            hotspot_count=len(pool.get("hotspots") or []),
+        )
+    except Exception as exc:
+        set_trend_task(
+            task_id,
+            status="error",
+            stage="error",
+            progress=0,
+            progress_label="热点拆分进度",
+            message=str(exc),
+            error=str(exc),
+        )
+    finally:
+        global ACTIVE_TREND_HOTSPOT_TASK_ID
+        with TREND_HOTSPOT_LOCK:
+            if ACTIVE_TREND_HOTSPOT_TASK_ID == task_id:
+                ACTIVE_TREND_HOTSPOT_TASK_ID = None
+
+
+def start_trend_hotspot_pool_build(payload):
+    global ACTIVE_TREND_HOTSPOT_TASK_ID
+    payload = payload or {}
+    with TREND_HOTSPOT_LOCK:
+        active_task = get_trend_task(ACTIVE_TREND_HOTSPOT_TASK_ID) if ACTIVE_TREND_HOTSPOT_TASK_ID else {}
+        if active_task.get("status") in {"queued", "running"}:
+            return active_task
+        task_id = f"trend-hotspots-{uuid4().hex[:12]}"
+        task = set_trend_task(
+            task_id,
+            kind="hotspot_pool",
+            status="queued",
+            stage="queued",
+            progress=0,
+            progress_label="热点拆分进度",
+            message="已加入热点整理队列",
+            created_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        ACTIVE_TREND_HOTSPOT_TASK_ID = task_id
+    threading.Thread(
+        target=trend_hotspot_pool_worker,
+        args=(task_id, dict(payload)),
+        daemon=True,
+    ).start()
+    return task
 
 
 def resolve_relative_path(base_dir, relative_path):
@@ -966,21 +3801,7 @@ def download_video_as_mp4(candidate, task_id):
 
 
 def chrome_executable():
-    candidates = []
-    if os.name == "nt":
-        candidates.extend([
-            Path(os.environ.get("PROGRAMFILES", "")) / "Google/Chrome/Application/chrome.exe",
-            Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Google/Chrome/Application/chrome.exe",
-            Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
-        ])
-    elif sys.platform == "darwin":
-        candidates.append(Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"))
-    else:
-        candidates.extend([Path("/usr/bin/google-chrome"), Path("/usr/bin/google-chrome-stable"), Path("/usr/bin/chromium")])
-    for candidate in candidates:
-        if candidate and candidate.exists():
-            return str(candidate)
-    return shutil.which("google-chrome") or shutil.which("chrome") or shutil.which("chromium")
+    return _chrome_executable()
 
 
 def open_chrome_search(payload):
@@ -998,14 +3819,6 @@ def open_chrome_search(payload):
         "web": f"https://www.google.com/search?tbm=vid&q={encoded}",
     }
     url = urls.get(source, urls["web"])
-    # Delegate to the OS shell on Windows. This is more reliable than spawning
-    # a second Chrome process when Chrome is already running or installed per-user.
-    if os.name == "nt":
-        try:
-            os.startfile(url)
-            return {"url": url, "browser": "system", "message": "已打开搜索网页，请完成登录后返回应用。"}
-        except OSError as exc:
-            logging.warning("无法通过系统打开搜索网页: %s", exc)
     executable = chrome_executable()
     if executable:
         try:
@@ -1013,13 +3826,7 @@ def open_chrome_search(payload):
             return {"url": url, "browser": "chrome", "message": "已打开搜索网页，请完成登录后返回应用。"}
         except OSError as exc:
             logging.warning("无法启动 Chrome (%s): %s", executable, exc)
-    try:
-        opened = webbrowser.open(url, new=1)
-    except Exception as exc:
-        raise RuntimeError(f"无法打开浏览器，请手动复制搜索链接：{url}") from exc
-    if not opened:
-        raise RuntimeError(f"浏览器未能启动，请手动复制搜索链接：{url}")
-    return {"url": url, "browser": "default", "message": "未能启动 Chrome，已尝试使用系统默认浏览器打开搜索页。"}
+    raise RuntimeError("未找到或无法启动 Google Chrome；应用不会回退到 Edge 或系统默认浏览器")
 
 
 def trend_import_worker(task_id, candidate):
@@ -1583,8 +4390,10 @@ def retry_clip_task(task_id):
     if task_type == "analyze":
         params = old.get("params") or {}
         payload = dict(params)
-        payload["api_key"] = (read_json(SETTINGS_PATH, {}).get("deepseek_api_key") or "").strip()
-        payload["save_key"] = False
+        provider = enabled_provider("llm")
+        if not provider or not provider.get("api_key"):
+            raise RuntimeError("请先在供应商管理中添加并启用一个 LLM 配置。")
+        payload["provider_id"] = provider.get("id")
         new_task_id, _task = create_clip_task(job_id, "analyze", "analyze")
         task = set_clip_task(new_task_id, retry_of=task_id, params=params, encoder="DeepSeek", message="\u91cd\u8bd5\u5206\u6790\u4efb\u52a1\u5df2\u52a0\u5165\u961f\u5217")
         threading.Thread(target=analyze_worker, args=(new_task_id, job_id, payload), daemon=True).start()
@@ -1779,40 +4588,41 @@ def mask_secret(value):
 
 
 def provider_settings():
-    """Load provider records and migrate the old single-key settings without losing them."""
+    """Load only the provider-manager configuration schema.
+
+    Legacy single-key settings are deliberately removed instead of migrated.
+    This prevents the packaged app's old and new forms from disagreeing about
+    which credential is active.
+    """
     saved = read_json(SETTINGS_PATH, {})
     changed = False
+    legacy_keys = {
+        "deepseek_api_key",
+        "volcengine_api_key", "volcengine_resource_id", "volcengine_appid",
+        "volcengine_token", "volcengine_cluster", "volcengine_audio_url",
+        "volcengine_poll_interval",
+        "tos_access_key", "tos_secret_key", "tos_endpoint", "tos_region",
+        "tos_bucket", "tos_prefix", "tos_url_expires",
+    }
+    for key in legacy_keys:
+        if key in saved:
+            saved.pop(key, None)
+            changed = True
     llms = saved.get("llm_providers")
     volcengines = saved.get("volcengine_providers")
     if not isinstance(llms, list):
         llms = []
-        old_key = (saved.get("deepseek_api_key") or "").strip()
-        if old_key:
-            llms.append({
-                "id": provider_id(), "name": "DeepSeek", "api_key": old_key,
-                "base_url": "https://api.deepseek.com/chat/completions",
-                "protocol": "openai", "model": "deepseek-v4-flash", "enabled": True,
-            })
         saved["llm_providers"] = llms
         changed = True
+    for item in llms:
+        if not isinstance(item, dict):
+            continue
+        normalized_url = normalize_llm_base_url(item.get("base_url"))
+        if normalized_url and normalized_url != item.get("base_url"):
+            item["base_url"] = normalized_url
+            changed = True
     if not isinstance(volcengines, list):
         volcengines = []
-        old_key = (saved.get("volcengine_api_key") or "").strip()
-        if old_key:
-            volcengines.append({
-                "id": provider_id(), "name": "火山语音转写", "api_key": old_key,
-                "resource_id": saved.get("volcengine_resource_id", "volc.seedasr.auc"),
-                "audio_url": saved.get("volcengine_audio_url", ""),
-                "poll_interval": saved.get("volcengine_poll_interval", 5),
-                "tos_access_key": saved.get("tos_access_key", ""),
-                "tos_secret_key": saved.get("tos_secret_key", ""),
-                "tos_endpoint": saved.get("tos_endpoint", ""),
-                "tos_region": saved.get("tos_region", ""),
-                "tos_bucket": saved.get("tos_bucket", ""),
-                "tos_prefix": saved.get("tos_prefix", "mp4-golden-asr"),
-                "tos_url_expires": saved.get("tos_url_expires", 86400),
-                "enabled": True,
-            })
         saved["volcengine_providers"] = volcengines
         changed = True
     if changed:
@@ -1837,7 +4647,6 @@ def public_provider(provider, kind):
     item["has_api_key"] = bool(provider.get("api_key"))
     item["masked_api_key"] = mask_secret(provider.get("api_key"))
     if kind == "volcengine":
-        item.pop("audio_url", None)
         item.pop("tos_access_key", None)
         item.pop("tos_secret_key", None)
         item["has_tos_access_key"] = bool(provider.get("tos_access_key"))
@@ -1845,14 +4654,241 @@ def public_provider(provider, kind):
     return item
 
 
+def normalize_llm_base_url(value):
+    """Normalize an OpenAI-compatible base URL without duplicating endpoint paths."""
+    base_url = str(value or "").strip().rstrip("/")
+    for suffix in ("/chat/completions", "/responses", "/models"):
+        if base_url.lower().endswith(suffix):
+            base_url = base_url[: -len(suffix)].rstrip("/")
+    return base_url
+
+
+def llm_endpoint(base_url, suffix):
+    normalized = normalize_llm_base_url(base_url)
+    return f"{normalized}/{suffix.lstrip('/')}"
+
+
+def llm_provider_from_payload(payload):
+    provider_id_value = str(payload.get("provider_id") or payload.get("id") or "").strip()
+    if provider_id_value:
+        saved = provider_settings()
+        provider = next((item for item in saved.get("llm_providers", []) if item.get("id") == provider_id_value), None)
+        if provider:
+            merged = dict(provider)
+            if payload.get("api_key"):
+                merged["api_key"] = str(payload.get("api_key")).strip()
+            if payload.get("base_url"):
+                merged["base_url"] = payload.get("base_url")
+            if payload.get("protocol"):
+                merged["protocol"] = payload.get("protocol")
+            return merged
+    return {
+        "name": str(payload.get("name") or "LLM").strip()[:80],
+        "api_key": str(payload.get("api_key") or "").strip(),
+        "base_url": normalize_llm_base_url(payload.get("base_url")),
+        "protocol": str(payload.get("protocol") or "openai").strip().lower(),
+        "model": str(payload.get("model") or "").strip(),
+    }
+
+
+def fetch_llm_models(payload):
+    """Read the provider's model catalog using its OpenAI-compatible GET /models endpoint."""
+    provider = llm_provider_from_payload(payload)
+    key = str(provider.get("api_key") or "").strip()
+    base_url = normalize_llm_base_url(provider.get("base_url"))
+    protocol = str(provider.get("protocol") or "openai").strip().lower()
+    if protocol != "openai":
+        raise RuntimeError("当前仅支持通过 OpenAI 兼容协议获取模型列表。")
+    if not key or not base_url:
+        raise RuntimeError("请先填写接口 URL 和 API Key，再获取模型列表。")
+    request = urllib.request.Request(
+        llm_endpoint(base_url, "models"),
+        headers={"Accept": "application/json", "Authorization": f"Bearer {key}"},
+        method="GET",
+    )
+    provider_name = provider.get("name") or "LLM"
+    try:
+        with open_public_request(request, timeout=35) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:600]
+        raise RuntimeError(f"{provider_name} 模型列表请求失败：HTTP {exc.code} {detail}") from exc
+    except ExternalNetworkError as exc:
+        raise RuntimeError(f"{provider_name} 模型列表网络失败：{exc}") from exc
+    except (ValueError, urllib.error.URLError, OSError) as exc:
+        raise RuntimeError(f"{provider_name} 模型列表请求失败：{exc}") from exc
+    items = result.get("data") if isinstance(result, dict) else []
+    if not isinstance(items, list):
+        items = result.get("models") if isinstance(result, dict) else []
+    models = []
+    for item in items if isinstance(items, list) else []:
+        model_id = item.get("id") if isinstance(item, dict) else item
+        if model_id:
+            models.append(str(model_id).strip())
+    models = sorted(set(model for model in models if model), key=str.casefold)
+    if not models:
+        raise RuntimeError(f"{provider_name} 返回的模型列表为空。")
+    return {"models": models, "provider_name": provider_name, "endpoint": llm_endpoint(base_url, "models")}
+
+
+def llm_content_text(value):
+    """Normalize OpenAI/Anthropic text blocks and provider-specific JSON fields."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if text is None:
+                    text = item.get("content")
+                if text is None:
+                    text = item.get("output_text")
+                if text is not None:
+                    normalized = llm_content_text(text)
+                    if normalized:
+                        parts.append(normalized)
+            elif isinstance(item, str):
+                parts.append(item.strip())
+        return "\n".join(part for part in parts if part).strip()
+    if isinstance(value, dict):
+        for key in ("text", "content", "output_text", "response"):
+            if value.get(key) not in (None, "", [], {}):
+                normalized = llm_content_text(value[key])
+                if normalized:
+                    return normalized
+    return ""
+
+
+def parse_llm_json_payload(content):
+    """Parse JSON even when the model adds prose or Markdown fences around it."""
+    if isinstance(content, dict):
+        return content
+    text = llm_content_text(content).lstrip("\ufeff").strip()
+    if not text:
+        raise RuntimeError("模型返回内容为空")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        parsed = None
+        for index, char in enumerate(text):
+            if char not in "[{":
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(text[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict):
+                parsed = candidate
+                break
+        if parsed is None:
+            raise RuntimeError("模型返回内容中没有可解析的 JSON 对象")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("模型返回的 JSON 必须是对象")
+    return parsed
+
+
+def llm_json(prompt, provider_id=None, timeout=180, max_tokens=4096):
+    """Call the currently enabled LLM and return a JSON object only."""
+    provider = enabled_provider("llm", provider_id)
+    if not provider or not provider.get("api_key"):
+        raise RuntimeError("请先在供应商管理中添加并启用一个 LLM 配置。")
+    key = provider["api_key"].strip()
+    provider_name = provider.get("name") or "LLM"
+    model = (provider.get("model") or "").strip()
+    base_url = normalize_llm_base_url(provider.get("base_url"))
+    protocol = (provider.get("protocol") or "openai").strip().lower()
+    if not model or not base_url:
+        raise RuntimeError(f"LLM 配置“{provider_name}”缺少模型或接口 URL。")
+    system_prompt = "Return valid JSON only. Do not use Markdown. Do not invent sources, links, people, or quotations."
+    if protocol == "anthropic":
+        endpoint = base_url if base_url.endswith("/v1/messages") else base_url + "/v1/messages"
+        body = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": 0.2,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        headers = {"Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01"}
+    else:
+        endpoint = llm_endpoint(base_url, "chat/completions")
+        body = {
+            "model": model,
+            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
+            "temperature": 0.2,
+        }
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+    req = urllib.request.Request(
+        endpoint,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with open_public_request(req, timeout=timeout) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"{provider_name} 请求失败: {exc.code} {detail}") from exc
+    except ExternalNetworkError as exc:
+        raise RuntimeError(f"{provider_name} 网络连接失败：{exc}") from exc
+    except RuntimeError:
+        raise
+    except (urllib.error.URLError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise RuntimeError(f"{provider_name} 网络连接失败：{reason}") from exc
+    if protocol == "anthropic":
+        content = result.get("content")
+    else:
+        choices = result.get("choices") if isinstance(result, dict) else None
+        message = choices[0].get("message", {}) if isinstance(choices, list) and choices else {}
+        content = message.get("content") if isinstance(message, dict) else ""
+        if not content and isinstance(message, dict):
+            content = message.get("reasoning_content")
+        if not content and isinstance(choices, list) and choices:
+            content = choices[0].get("text")
+        if not content and isinstance(result, dict):
+            content = result.get("output_text") or result.get("content") or result.get("response")
+    try:
+        return parse_llm_json_payload(content)
+    except RuntimeError as exc:
+        # Some compatible gateways return the JSON object directly instead of a
+        # chat-completion envelope. Accept that shape when it is unambiguous.
+        if isinstance(result, dict) and any(key in result for key in ("ok", "topics", "queries", "title")):
+            return result
+        raise RuntimeError(f"{provider_name} 未返回可解析的内容：{exc}") from exc
+
+
+def test_llm_provider(provider_id=None):
+    """Verify an enabled LLM with a fixed, non-user-content payload."""
+    started = time.monotonic()
+    result = llm_json(
+        "Return a JSON object with exactly one boolean field named ok set to true.",
+        provider_id=provider_id,
+        timeout=35,
+        max_tokens=32,
+    )
+    if result.get("ok") is not True:
+        raise RuntimeError("LLM 连通性测试未返回预期的 JSON 结果。")
+    provider = enabled_provider("llm", provider_id) or {}
+    return {
+        "provider_id": provider.get("id") or "",
+        "provider_name": provider.get("name") or "LLM",
+        "model": provider.get("model") or "",
+        "elapsed_ms": round((time.monotonic() - started) * 1000),
+    }
+
+
 def volcengine_settings(payload=None):
     payload = payload or {}
     provider = enabled_provider("volcengine", payload.get("provider_id")) or {}
     return {
-        "api_key": (payload.get("volcengine_api_key") or provider.get("api_key") or os.environ.get("VOLCENGINE_API_KEY") or "").strip(),
-        "resource_id": (payload.get("volcengine_resource_id") or provider.get("resource_id") or os.environ.get("VOLCENGINE_RESOURCE_ID") or "volc.seedasr.auc").strip(),
-        "audio_url": (payload.get("volcengine_audio_url") or os.environ.get("VOLCENGINE_AUDIO_URL") or "").strip(),
-        "poll_interval": float(os.environ.get("VOLCENGINE_POLL_INTERVAL") or 5),
+        "api_key": str(provider.get("api_key") or "").strip(),
+        "resource_id": str(provider.get("resource_id") or "volc.seedasr.auc").strip(),
+        "audio_url": str(provider.get("audio_url") or "").strip(),
+        "poll_interval": max(2, min(30, float(provider.get("poll_interval") or 5))),
     }
 
 
@@ -1860,13 +4896,13 @@ def tos_settings(payload=None):
     payload = payload or {}
     provider = enabled_provider("volcengine", payload.get("provider_id")) or {}
     return {
-        "access_key": (payload.get("tos_access_key") or provider.get("tos_access_key") or os.environ.get("TOS_ACCESS_KEY") or "").strip(),
-        "secret_key": (payload.get("tos_secret_key") or provider.get("tos_secret_key") or os.environ.get("TOS_SECRET_KEY") or "").strip(),
-        "endpoint": (payload.get("tos_endpoint") or provider.get("tos_endpoint") or os.environ.get("TOS_ENDPOINT") or "").strip(),
-        "region": (payload.get("tos_region") or provider.get("tos_region") or os.environ.get("TOS_REGION") or "").strip(),
-        "bucket": (payload.get("tos_bucket") or provider.get("tos_bucket") or os.environ.get("TOS_BUCKET") or "").strip(),
-        "prefix": (payload.get("tos_prefix") or provider.get("tos_prefix") or os.environ.get("TOS_PREFIX") or "mp4-golden-asr").strip().strip("/"),
-        "url_expires": int(float(os.environ.get("TOS_URL_EXPIRES") or 86400)),
+        "access_key": str(provider.get("tos_access_key") or "").strip(),
+        "secret_key": str(provider.get("tos_secret_key") or "").strip(),
+        "endpoint": str(provider.get("tos_endpoint") or "").strip(),
+        "region": str(provider.get("tos_region") or "").strip(),
+        "bucket": str(provider.get("tos_bucket") or "").strip(),
+        "prefix": str(provider.get("tos_prefix") or "mp4-golden-asr").strip().strip("/"),
+        "url_expires": max(60, min(7 * 24 * 3600, int(float(provider.get("tos_url_expires") or 86400)))),
     }
 
 
@@ -2210,9 +5246,9 @@ def deepseek_analyze(job_id, payload, task_id=None):
     if not model:
         raise RuntimeError(f"LLM 配置“{provider_name}”缺少模型名称。")
 
-    target_count = int(payload.get("target_clip_count") or 20)
-    min_seconds = int(payload.get("min_seconds") or 8)
-    max_seconds = int(payload.get("max_seconds") or 45)
+    target_count = int(payload.get("target_clip_count") or 5)
+    min_seconds = int(payload.get("min_seconds") or 60)
+    max_seconds = int(payload.get("max_seconds") or 90)
     candidate_count = min(80, max(target_count * 2, target_count + 12))
     prompt = f"""You are a senior Chinese short-video editor, quote curator, and story producer.
 Your job is to find a broad candidate pool of moments that may become strong short-video highlight clips. The backend will strictly filter, deduplicate, and rank your candidates, so do not force weak moments just to fill the quota.
@@ -2302,53 +5338,18 @@ JSON schema:
 Transcript:
 {compact_segments}
 """
-    protocol = (provider.get("protocol") or "openai").strip().lower()
-    base_url = (provider.get("base_url") or "").strip().rstrip("/")
-    if not base_url:
-        raise RuntimeError(f"LLM 配置“{provider_name}”缺少接口 URL。")
-    system_prompt = "Return valid JSON only. No Markdown, no explanation outside JSON."
-    if protocol == "anthropic":
-        endpoint = base_url if base_url.endswith("/v1/messages") else base_url + "/v1/messages"
-        body = {
-            "model": model,
-            "max_tokens": 8192,
-            "temperature": 0.15,
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        headers = {"Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01"}
-    else:
-        endpoint = base_url if base_url.endswith("/chat/completions") else base_url + "/chat/completions"
-        body = {
-            "model": model,
-            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
-            "temperature": 0.15,
-        }
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        headers=headers,
-        method="POST",
+    # Keep clip analysis on the same transport and response parser used by the
+    # provider test and AI trend discovery. This handles OpenAI-compatible
+    # content variants consistently and never bypasses active system routing.
+    highlights = llm_json(
+        prompt,
+        provider_id=provider.get("id") or payload.get("provider_id"),
+        timeout=330,
+        max_tokens=8192,
     )
-    try:
-        with http_opener().open(req, timeout=330) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"{provider_name} 请求失败: {exc.code} {detail}")
 
     if task_id:
         wait_for_clip_task_resume(task_id)
-    if protocol == "anthropic":
-        content = "".join(part.get("text", "") for part in result.get("content", []) if part.get("type") == "text").strip()
-    else:
-        content = result["choices"][0]["message"]["content"].strip()
-    if not content:
-        raise RuntimeError(f"{provider_name} 未返回可解析的文本内容。")
-    if content.startswith("```"):
-        content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.S).strip()
-    highlights = json.loads(content)
     candidates = []
     duration = float(meta.get("duration") or 0)
     min_len = max(1.0, float(min_seconds))
@@ -2856,6 +5857,485 @@ def list_library():
     return items
 
 
+def _clip_export_path(job_id, clip):
+    """Resolve an exported clip to a local file inside the app-managed folders."""
+    base_dir = job_dir(job_id)
+    candidates = [clip.get("export_path"), clip.get("export_file")]
+    for raw in candidates:
+        if not raw:
+            continue
+        target = Path(str(raw)).expanduser()
+        if not target.is_absolute():
+            target = (base_dir / target).resolve()
+        else:
+            target = target.resolve()
+        for allowed in (base_dir.resolve(), OUTPUTS_DIR.resolve()):
+            try:
+                target.relative_to(allowed)
+                if target.is_file():
+                    return target
+            except ValueError:
+                continue
+    return None
+
+
+def list_publish_assets():
+    """List only complete videos explicitly imported for publishing.
+
+    Golden-quote exports remain task outputs. They are intentionally excluded
+    here so an extracted segment cannot be mistaken for a publish-ready cut.
+    """
+    assets = []
+    local_assets = read_json(PUBLISH_LOCAL_ASSETS_PATH, [])
+    changed = False
+    if not isinstance(local_assets, list):
+        local_assets = []
+        changed = True
+    for item in local_assets:
+        if not isinstance(item, dict):
+            changed = True
+            continue
+        file_path = Path(str(item.get("file_path") or ""))
+        if not file_path.is_file():
+            changed = True
+            continue
+        assets.append({
+            "asset_id": item.get("asset_id"),
+            "job_id": "",
+            "clip_id": "",
+            "title": item.get("title") or file_path.stem,
+            "file": file_path.name,
+            "file_path": str(file_path),
+            "file_url": f"/publish-local/{urllib.parse.quote(item.get('stored_name') or file_path.name)}",
+            "file_size": file_path.stat().st_size,
+            "duration": float(item.get("duration") or 0),
+            "source_title": "本地导入视频",
+            "status": "ready",
+            "origin": "local",
+        })
+    if changed:
+        valid_ids = {asset["asset_id"] for asset in assets if asset.get("origin") == "local"}
+        write_json(PUBLISH_LOCAL_ASSETS_PATH, [item for item in local_assets if isinstance(item, dict) and item.get("asset_id") in valid_ids])
+    return assets
+
+
+def import_publish_local_asset(upload_item):
+    if upload_item is None or not upload_item.filename:
+        raise RuntimeError("请选择一个本地视频文件")
+    ext = Path(upload_item.filename).suffix.lower()
+    if ext not in {".mp4", ".mov", ".m4v", ".webm"}:
+        raise RuntimeError("支持 MP4、MOV、M4V、WebM 视频文件")
+    PUBLISH_LOCAL_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    title = sanitize_output_name(upload_item.filename)
+    asset_id = f"local-{uuid4().hex[:12]}"
+    stored_name = f"{asset_id}{ext}"
+    target = PUBLISH_LOCAL_ASSETS_DIR / stored_name
+    with UPLOAD_LOCK:
+        with target.open("wb") as output:
+            shutil.copyfileobj(upload_item.file, output)
+    try:
+        probe = probe_video(target)
+        duration = float(probe.get("duration") or 0)
+    except Exception:
+        duration = 0.0
+    record = {
+        "asset_id": asset_id,
+        "title": title,
+        "stored_name": stored_name,
+        "file_path": str(target),
+        "duration": duration,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    existing = read_json(PUBLISH_LOCAL_ASSETS_PATH, [])
+    if not isinstance(existing, list):
+        existing = []
+    existing.insert(0, record)
+    write_json(PUBLISH_LOCAL_ASSETS_PATH, existing[:100])
+    return {
+        "asset_id": asset_id,
+        "title": title,
+        "file": target.name,
+        "file_path": str(target),
+        "file_url": f"/publish-local/{urllib.parse.quote(stored_name)}",
+        "file_size": target.stat().st_size,
+        "duration": duration,
+        "source_title": "本地导入视频",
+        "status": "ready",
+        "origin": "local",
+    }
+
+
+def _shared_publish_browser_page_urls():
+    """Legacy CDP probe retained for old state files, not direct Chrome."""
+    return None
+
+
+def _publish_platform_target_url(platform):
+    return {
+        "douyin": "https://creator.douyin.com/",
+        "channels": "https://channels.weixin.qq.com/",
+    }.get(str(platform or ""))
+
+
+def _reconcile_closed_manual_publish_tasks(force=False):
+    """Direct-launch publishers report window closure through their process."""
+    # The original publisher projects own the visible browser process directly;
+    # there is no shared CDP endpoint to probe and no safe way to infer closure
+    # from the backend. Let the publisher return its TargetClosedError marker.
+    return 0
+def list_publish_tasks():
+    _reconcile_closed_manual_publish_tasks()
+    with PUBLISH_TASK_LOCK:
+        tasks = [dict(item) for item in PUBLISH_TASKS.values()]
+    for task in tasks:
+        message = str(task.get("message") or "")
+        if task.get("status") == "error" and _publisher_window_closed_by_user(
+            "\n".join([
+                message,
+                str(task.get("error") or ""),
+                str((task.get("result") or {}).get("output") or ""),
+            ])
+        ):
+            task["status"] = "cancelled"
+            task["result_state"] = "cancelled_by_user"
+            task["message"] = _publish_window_closed_message(task.get("platform"))
+            task["error"] = ""
+            continue
+        if (
+            "ERR_NETWORK_ACCESS_DENIED" in message
+            or "ERR_NETWORK_ACCESS_DENIED" in str(task.get("error") or "")
+            or "浏览器网络连接被系统拒绝" in message
+        ):
+            task["message"] = (
+                "抖音发布页无法访问：浏览器网络连接被系统拒绝。"
+                "当前发布器已按此前成功路径直连本机 Chrome；请检查 Windows 防火墙、VPN 或安全软件的网络限制后重试。"
+            )
+    def task_sort_key(item):
+        raw = str(item.get("updated_at") or item.get("created_at") or "")
+        try:
+            stamp = datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            stamp = 0
+        return (stamp, str(item.get("task_id") or ""))
+
+    return sorted(tasks, key=task_sort_key, reverse=True)
+
+
+def list_task_center_tasks(job_id=None, limit=100):
+    """Return clip, publish, and persisted trend-search records in one feed."""
+    clip_tasks = list_clip_tasks(job_id=job_id, limit=max(1, int(limit or 100)))
+    publish_tasks = list_publish_tasks()
+    if job_id:
+        publish_tasks = [task for task in publish_tasks if task.get("job_id") == job_id]
+
+    entries = []
+    for task in clip_tasks:
+        item = dict(task)
+        item.setdefault("category", item.get("type") or "other")
+        entries.append(item)
+    for task in publish_tasks:
+        item = dict(task)
+        item["type"] = "publish"
+        item["category"] = "publish"
+        item["publish_status"] = task.get("status")
+        item["percent"] = 100 if task.get("status") == "succeeded" else 0
+        item["progress"] = 1 if task.get("status") == "succeeded" else 0
+        item["message"] = task.get("message") or "等待发布"
+        entries.append(item)
+    if not job_id:
+        entries.extend(list_trend_search_task_records(limit=max(1, int(limit or 100))))
+
+    entries.sort(key=lambda task: str(task.get("updated_at") or task.get("created_at") or ""), reverse=True)
+    return entries[: max(1, int(limit or 100))]
+
+
+def list_trend_search_task_records(limit=100):
+    """Expose saved results and in-flight trend discovery in the task center."""
+    entries = []
+    with TREND_TASK_LOCK:
+        active_tasks = [dict(task) for task in TREND_TASKS.values()]
+    for task in active_tasks:
+        if task.get("kind") != "discovery" or task.get("status") == "done":
+            continue
+        item = dict(task)
+        item["type"] = "trend_search"
+        item["category"] = "trend"
+        hotspot_count = max(0, min(10, len(item.get("hotspot_ids") or [])))
+        person_count = max(0, min(6, len(item.get("person_ids") or [])))
+        if hotspot_count:
+            item["title"] = f"爆款搜索 · {hotspot_count} 条热点"
+        elif person_count:
+            item["title"] = f"爆款搜索 · {person_count} 位人物"
+        else:
+            item["title"] = "爆款搜索"
+        item["message"] = item.get("message") or "正在生成爆款选题"
+        entries.append(item)
+
+    for path in sorted(TRENDS_DIR.glob("trend-*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        result = read_json(path, {})
+        if not isinstance(result, dict):
+            continue
+        search_id = str(result.get("search_id") or "").strip()
+        if not search_id.startswith("trend-"):
+            continue
+        topics = [topic for topic in result.get("topics", []) if isinstance(topic, dict)]
+        selected_hotspots = [str(item.get("title") or "").strip() for item in result.get("selected_hotspots", []) if isinstance(item, dict)]
+        selected_people = [str(item.get("name") or "").strip() for item in result.get("selected_people", []) if isinstance(item, dict)]
+        labels = selected_hotspots or selected_people
+        if not labels:
+            labels = [str(topic.get("subject_label") or topic.get("speaker_name") or topic.get("title") or "").strip() for topic in topics]
+        names = list(dict.fromkeys(name for name in labels if name))
+        title_suffix = "、".join(names[:3]) or "已保存结果"
+        created_at = str(result.get("created_at") or datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"))
+        material_topic_count = len(topics_with_materials(topics))
+        entries.append({
+            "task_id": f"trend-record-{search_id}",
+            "search_id": search_id,
+            "type": "trend_search",
+            "category": "trend",
+            "status": "done",
+            "progress": 1,
+            "percent": 100,
+            "title": f"爆款搜索 · {title_suffix}",
+            "message": f"已生成 {len(topics)} 条选题，其中 {material_topic_count} 条找到视频素材",
+            "created_at": created_at,
+            "updated_at": created_at,
+            "topic_count": len(topics),
+            "candidate_count": len(result.get("candidates") or []),
+        })
+        if len(entries) >= max(1, int(limit or 100)) + len(active_tasks):
+            break
+    return entries
+
+
+def clear_finished_publish_tasks():
+    removable = {"succeeded", "error", "cancelled"}
+    removed = 0
+    with PUBLISH_TASK_LOCK:
+        for task_id, task in list(PUBLISH_TASKS.items()):
+            if task.get("status") in removable:
+                PUBLISH_TASKS.pop(task_id, None)
+                removed += 1
+        if removed:
+            write_json(PUBLISH_TASKS_PATH, PUBLISH_TASKS)
+    return removed
+
+
+def clear_finished_trend_search_records():
+    """Remove completed discovery records while leaving temporary candidate pools alone."""
+    removed = 0
+    with TREND_TASK_LOCK:
+        for task_id, task in list(TREND_TASKS.items()):
+            if task.get("kind") == "discovery" and task.get("status") in {"done", "error"}:
+                TREND_TASKS.pop(task_id, None)
+                removed += 1
+    for path in TRENDS_DIR.glob("trend-*.json"):
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def delete_task_record(task_id):
+    """Delete one task-center record without deleting its workspace files."""
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        raise RuntimeError("缺少任务记录 ID")
+
+    removed_clip = False
+    with CLIP_TASK_LOCK:
+        clip_task = CLIP_TASKS.get(task_id)
+        if clip_task:
+            if clip_task.get("status") in {"queued", "running", "paused"}:
+                raise RuntimeError("任务仍在运行，请先取消或结束后再删除记录")
+            CLIP_TASKS.pop(task_id, None)
+            removed_clip = True
+    if removed_clip:
+        persist_clip_tasks()
+        return {"task_id": task_id, "deleted": True, "kind": "clip"}
+
+    with PUBLISH_TASK_LOCK:
+        publish_task = PUBLISH_TASKS.get(task_id)
+        if publish_task:
+            if publish_task.get("status") in {"queued", "running"}:
+                raise RuntimeError("发布任务仍在运行，请等待结束后再删除记录")
+            PUBLISH_TASKS.pop(task_id, None)
+            write_json(PUBLISH_TASKS_PATH, PUBLISH_TASKS)
+            return {"task_id": task_id, "deleted": True, "kind": "publish"}
+
+    with TREND_TASK_LOCK:
+        trend_task = TREND_TASKS.get(task_id)
+        if trend_task:
+            if trend_task.get("status") in {"queued", "running"}:
+                raise RuntimeError("爆款搜索仍在运行，请等待结束后再删除记录")
+            TREND_TASKS.pop(task_id, None)
+            return {"task_id": task_id, "deleted": True, "kind": "trend"}
+
+    record_prefix = "trend-record-"
+    if task_id.startswith(record_prefix):
+        search_id = task_id.removeprefix(record_prefix)
+        if not search_id.startswith("trend-"):
+            raise RuntimeError("无效的爆款搜索记录 ID")
+        path = trend_search_path(search_id)
+        if not path.exists():
+            raise RuntimeError("找不到爆款搜索记录")
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise RuntimeError(f"删除爆款搜索记录失败：{exc}") from exc
+        return {"task_id": task_id, "deleted": True, "kind": "trend_record"}
+
+    raise RuntimeError("找不到任务记录")
+
+
+def _normalize_publish_hashtags(value):
+    if isinstance(value, str):
+        value = re.split(r"[\s,，、#]+", value)
+    return [str(item).strip().lstrip("#") for item in (value or []) if str(item).strip()]
+
+
+def _platform_publish_payload(platform, supplied, legacy):
+    """Normalize per-platform metadata while retaining the old publish API."""
+    raw = supplied if isinstance(supplied, dict) else {}
+    schedule = str(raw.get("schedule") or legacy["schedule"]).strip()
+    if schedule not in {"manual_review", "publish_now", "draft"}:
+        schedule = "manual_review"
+
+    if platform == "douyin":
+        return {
+            "title": str(raw.get("title") or legacy["title"]).strip(),
+            "description": str(raw.get("description") or legacy["description"]).strip(),
+            "hashtags": _normalize_publish_hashtags(raw.get("hashtags", legacy["hashtags"])),
+            "schedule": schedule,
+        }
+    if platform == "channels":
+        return {
+            "description": str(raw.get("description") or legacy["description"]).strip(),
+            "short_title": str(raw.get("short_title") or "").strip(),
+            "hashtags": _normalize_publish_hashtags(raw.get("hashtags", legacy["hashtags"])),
+            "schedule": schedule,
+        }
+    if platform == "xiaohongshu":
+        return {
+            "title": str(raw.get("title") or legacy["title"]).strip(),
+            "content": str(raw.get("content") or raw.get("description") or legacy["description"]).strip(),
+            "hashtags": _normalize_publish_hashtags(raw.get("hashtags", legacy["hashtags"])),
+            "schedule": schedule,
+        }
+    raise RuntimeError("包含不支持的发布平台")
+
+
+def _publish_task_metadata(platform, platform_payload, asset_title):
+    """Map platform-specific fields to the common task fields used by adapters."""
+    if platform == "channels":
+        description = platform_payload["description"]
+        return {
+            "title": platform_payload["short_title"] or description or asset_title,
+            "description": description,
+            "hashtags": platform_payload["hashtags"],
+            "schedule": platform_payload["schedule"],
+        }
+    if platform == "xiaohongshu":
+        return {
+            "title": platform_payload["title"] or asset_title,
+            "description": platform_payload["content"],
+            "hashtags": platform_payload["hashtags"],
+            "schedule": platform_payload["schedule"],
+        }
+    return {
+        "title": platform_payload["title"] or asset_title,
+        "description": platform_payload["description"],
+        "hashtags": platform_payload["hashtags"],
+        "schedule": platform_payload["schedule"],
+    }
+
+
+def create_publish_tasks(payload):
+    _reconcile_closed_manual_publish_tasks(force=True)
+    asset_ids = [str(item).strip() for item in (payload.get("asset_ids") or []) if str(item).strip()]
+    platforms = [str(item).strip() for item in (payload.get("platforms") or []) if str(item).strip()]
+    assets = {item["asset_id"]: item for item in list_publish_assets()}
+    if not asset_ids:
+        raise RuntimeError("请至少选择一个成片")
+    if not platforms:
+        raise RuntimeError("请至少选择一个发布平台")
+    missing = [item for item in asset_ids if item not in assets]
+    if missing:
+        raise RuntimeError("所选成片已不存在，请刷新成片列表")
+    unknown = [item for item in platforms if item not in PUBLISH_PLATFORMS]
+    if unknown:
+        raise RuntimeError("包含不支持的发布平台")
+    unavailable = [
+        item for item in platforms
+        if not _adapter_diagnostics(item).get("ready")
+    ]
+    if unavailable:
+        names = "、".join(PUBLISH_PLATFORMS[item]["name"] for item in unavailable)
+        raise RuntimeError(f"{names} 尚未准备好本地发布适配器，请先完成配置或选择其他平台")
+    legacy = {
+        "title": str(payload.get("title") or "").strip(),
+        "description": str(payload.get("description") or "").strip(),
+        "hashtags": payload.get("hashtags") or [],
+        "schedule": str(payload.get("schedule") or "manual_review").strip(),
+    }
+    supplied_payloads = payload.get("platform_payloads") or {}
+    if not isinstance(supplied_payloads, dict):
+        raise RuntimeError("平台发布参数格式不正确")
+    platform_payloads = {
+        platform: _platform_publish_payload(platform, supplied_payloads.get(platform), legacy)
+        for platform in platforms
+    }
+    if platform_payloads.get("xiaohongshu", {}).get("schedule") != "publish_now" and "xiaohongshu" in platforms:
+        raise RuntimeError("小红书当前适配器会直接提交发布，请选择“自动点击发布”后再创建任务")
+    now = datetime.now().isoformat(timespec="seconds")
+    created = []
+    with PUBLISH_TASK_LOCK:
+        active_pairs = {
+            (task.get("asset_id"), task.get("platform"))
+            for task in PUBLISH_TASKS.values()
+            if task.get("status") in {"planned", "queued", "running"}
+        }
+        for asset_id in asset_ids:
+            asset = assets[asset_id]
+            for platform in platforms:
+                if (asset_id, platform) in active_pairs:
+                    platform_name = PUBLISH_PLATFORMS[platform]["name"]
+                    raise RuntimeError(
+                        f"该成片的{platform_name}发布任务仍在启动或运行中。"
+                        "请等待该任务结束后重试。"
+                    )
+                platform_info = PUBLISH_PLATFORMS[platform]
+                platform_payload = platform_payloads[platform]
+                metadata = _publish_task_metadata(platform, platform_payload, asset["title"])
+                task_id = f"publish-{uuid4().hex[:12]}"
+                task = {
+                    "task_id": task_id,
+                    "asset_id": asset_id,
+                    "job_id": asset["job_id"],
+                    "clip_id": asset["clip_id"],
+                    "file": asset["file"],
+                    "file_path": asset.get("file_path"),
+                    "platform": platform,
+                    "platform_name": platform_info["name"],
+                    "title": metadata["title"],
+                    "description": metadata["description"],
+                    "hashtags": metadata["hashtags"],
+                    "schedule": metadata["schedule"],
+                    "platform_payload": platform_payload,
+                    "status": "planned",
+                    "message": "已创建发布任务，等待执行",
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                PUBLISH_TASKS[task_id] = task
+                created.append(task)
+                active_pairs.add((asset_id, platform))
+        write_json(PUBLISH_TASKS_PATH, PUBLISH_TASKS)
+    return created
+
+
 def list_task_center_jobs():
     """List uploaded video workspaces that are waiting for transcription."""
     items = []
@@ -2882,6 +6362,9 @@ def clear_library():
         JOBS.clear()
     with CLIP_TASK_LOCK:
         CLIP_TASKS.clear()
+    with PUBLISH_TASK_LOCK:
+        PUBLISH_TASKS.clear()
+        write_json(PUBLISH_TASKS_PATH, PUBLISH_TASKS)
     if JOBS_DIR.exists():
         for path in list(JOBS_DIR.glob("*")):
             if path.is_dir():
@@ -2921,6 +6404,11 @@ def delete_library_job(job_id):
         for task_id, task in list(CLIP_TASKS.items()):
             if task.get("job_id") == job_id:
                 CLIP_TASKS.pop(task_id, None)
+    with PUBLISH_TASK_LOCK:
+        for task_id, task in list(PUBLISH_TASKS.items()):
+            if task.get("job_id") == job_id:
+                PUBLISH_TASKS.pop(task_id, None)
+        write_json(PUBLISH_TASKS_PATH, PUBLISH_TASKS)
     active_path = RUNTIME_DIR / "active_job.json"
     if read_json(active_path, {}).get("job_id") == job_id:
         write_json(active_path, {})
@@ -2939,6 +6427,9 @@ class Handler(SimpleHTTPRequestHandler):
 
         if path == "/":
             self.serve_file(STATIC_DIR / "index.html")
+        elif path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
         elif path.startswith("/static/"):
             static_path = resolve_relative_path(STATIC_DIR, path.removeprefix("/static/"))
             if not static_path:
@@ -2947,6 +6438,34 @@ class Handler(SimpleHTTPRequestHandler):
             self.serve_file(static_path)
         elif path.startswith("/media/"):
             self.serve_media(path.removeprefix("/media/"))
+        elif path.startswith("/media-output/"):
+            relative = urllib.parse.unquote(path.removeprefix("/media-output/"))
+            target = resolve_relative_path(OUTPUTS_DIR, relative)
+            if not target:
+                self.send_error(403)
+                return
+            self.serve_file(target)
+        elif path.startswith("/publish-local/"):
+            relative = urllib.parse.unquote(path.removeprefix("/publish-local/"))
+            target = resolve_relative_path(PUBLISH_LOCAL_ASSETS_DIR, relative)
+            if not target:
+                self.send_error(403)
+                return
+            self.serve_file(target)
+        elif path == "/api/publish/capabilities":
+            json_response(self, {"ok": True, **publish_capabilities()})
+        elif path == "/api/publish/assets":
+            assets = list_publish_assets()
+            json_response(self, {"ok": True, "assets": assets})
+        elif path == "/api/publish/tasks":
+            tasks = list_publish_tasks()
+            json_response(self, {
+                "ok": True,
+                "tasks": tasks,
+                "current": tasks[0] if tasks else None,
+            })
+        elif path == "/api/publish/login-tasks":
+            json_response(self, {"ok": True, "tasks": list_publish_login_tasks()})
         elif path == "/api/job/status":
             job_id = query.get("job_id", [""])[0]
             job = get_job_state(job_id)
@@ -2966,12 +6485,21 @@ class Handler(SimpleHTTPRequestHandler):
             json_response(self, {"ok": True, **dependency_health()})
         elif path == "/api/tasks":
             job_id = query.get("job_id", [""])[0] or None
-            limit = int(query.get("limit", ["30"])[0] or 30)
+            limit = int(query.get("limit", ["100"])[0] or 100)
             json_response(self, {
                 "ok": True,
-                "tasks": list_clip_tasks(job_id=job_id, limit=limit),
+                "tasks": list_task_center_tasks(job_id=job_id, limit=limit),
+                "clip_tasks": list_clip_tasks(job_id=job_id, limit=limit),
+                "publish_tasks": [task for task in list_publish_tasks() if not job_id or task.get("job_id") == job_id],
                 "jobs": list_task_center_jobs(),
             })
+        elif path in {"/api/trends/discover/status", "/api/trends/hotspots/status"}:
+            task_id = query.get("task_id", [""])[0]
+            task = get_trend_task(task_id)
+            if not task:
+                error_response(self, "找不到 AI 爆款任务", 404)
+                return
+            json_response(self, {"ok": True, "task": task})
         elif path == "/api/trends/import/status":
             task_id = query.get("task_id", [""])[0]
             task = get_trend_task(task_id)
@@ -2986,6 +6514,9 @@ class Handler(SimpleHTTPRequestHandler):
                 error_response(self, "找不到搜索结果", 404)
                 return
             json_response(self, {"ok": True, **result})
+        elif path == "/api/trends/knowledge":
+            knowledge = trend_knowledge_store()
+            json_response(self, {"ok": True, "entries": knowledge.get("entries", [])})
         elif path == "/api/clips/render-status":
             task_id = query.get("task_id", [""])[0]
             task = get_clip_task(task_id)
@@ -3018,35 +6549,6 @@ class Handler(SimpleHTTPRequestHandler):
                     "highlights": get_highlights(job_id),
                 },
             )
-        elif path == "/api/settings":
-            saved = read_json(SETTINGS_PATH, {})
-            key = saved.get("deepseek_api_key", "")
-            volc_key = saved.get("volcengine_api_key", "")
-            masked = f"{key[:6]}...{key[-4:]}" if len(key) > 12 else ""
-            volc_masked = f"{volc_key[:6]}...{volc_key[-4:]}" if len(volc_key) > 12 else (volc_key[:4] + "..." if volc_key else "")
-            json_response(self, {
-                "ok": True,
-                "has_key": bool(key),
-                "masked_key": masked,
-                "volcengine": {
-                    "has_token": bool(volc_key),
-                    "masked_token": volc_masked,
-                    "has_api_key": bool(volc_key),
-                    "masked_api_key": volc_masked,
-                    "resource_id": saved.get("volcengine_resource_id", "volc.seedasr.auc"),
-                    "audio_url": saved.get("volcengine_audio_url", ""),
-                    "poll_interval": saved.get("volcengine_poll_interval", 5),
-                },
-                "tos": {
-                    "has_secret": bool(saved.get("tos_secret_key")),
-                    "access_key": saved.get("tos_access_key", ""),
-                    "endpoint": saved.get("tos_endpoint", ""),
-                    "region": saved.get("tos_region", ""),
-                    "bucket": saved.get("tos_bucket", ""),
-                    "prefix": saved.get("tos_prefix", "mp4-golden-asr"),
-                    "url_expires": saved.get("tos_url_expires", 86400),
-                },
-            })
         elif path == "/api/providers":
             saved = provider_settings()
             json_response(self, {
@@ -3065,16 +6567,20 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             if path == "/api/video/upload":
                 self.handle_upload()
+            elif path == "/api/publish/local-assets":
+                self.handle_publish_local_asset()
             else:
                 payload = self.read_body_json()
                 if path == "/api/video/browser-preview":
                     self.handle_browser_preview(payload)
                 elif path == "/api/transcribe/range":
                     self.handle_transcription_range(payload)
-                elif path == "/api/settings":
-                    self.handle_save_settings(payload)
                 elif path == "/api/providers":
                     self.handle_providers(payload)
+                elif path == "/api/providers/models":
+                    json_response(self, {"ok": True, **fetch_llm_models(payload)})
+                elif path == "/api/providers/llm-test":
+                    json_response(self, {"ok": True, **test_llm_provider(payload.get("provider_id"))})
                 elif path == "/api/transcribe/start":
                     self.handle_transcribe_start(payload)
                 elif path == "/api/transcribe/control":
@@ -3106,11 +6612,26 @@ class Handler(SimpleHTTPRequestHandler):
                 elif path == "/api/storage/cleanup":
                     json_response(self, {"ok": True, **cleanup_storage(payload)})
                 elif path == "/api/tasks/clear-finished":
-                    json_response(self, {"ok": True, "removed": clear_finished_clip_tasks(payload.get("job_id") or None), "tasks": list_clip_tasks(job_id=payload.get("job_id") or None)})
+                    job_id = payload.get("job_id") or None
+                    removed = clear_finished_clip_tasks(job_id)
+                    if not job_id:
+                        removed += clear_finished_publish_tasks()
+                        removed += clear_finished_trend_search_records()
+                    json_response(self, {"ok": True, "removed": removed, "tasks": list_task_center_tasks(job_id=job_id)})
+                elif path == "/api/tasks/delete":
+                    json_response(self, {"ok": True, **delete_task_record(payload.get("task_id"))})
                 elif path == "/api/tasks/retry":
                     json_response(self, {"ok": True, "task": retry_clip_task(payload.get("task_id"))})
                 elif path == "/api/trends/search":
                     self.handle_trend_search(payload)
+                elif path == "/api/trends/people":
+                    self.handle_trend_people(payload)
+                elif path == "/api/trends/hotspots":
+                    self.handle_trend_hotspots(payload)
+                elif path == "/api/trends/discover":
+                    self.handle_trend_discovery(payload)
+                elif path == "/api/trends/knowledge":
+                    self.handle_trend_knowledge(payload)
                 elif path == "/api/trends/browser/open":
                     json_response(self, {"ok": True, **open_chrome_search(payload)})
                 elif path == "/api/trends/import":
@@ -3119,6 +6640,18 @@ class Handler(SimpleHTTPRequestHandler):
                     json_response(self, {"ok": True, **delete_library_job(payload.get("job_id") or "")})
                 elif path == "/api/library/clear-all":
                     json_response(self, {"ok": True, **clear_library()})
+                elif path == "/api/publish/tasks":
+                    tasks = create_publish_tasks(payload)
+                    json_response(self, {"ok": True, "tasks": tasks, "created": len(tasks)})
+                elif path == "/api/publish/execute":
+                    tasks = execute_publish_tasks(payload.get("task_ids") or [])
+                    json_response(self, {"ok": True, "tasks": tasks, "started": len(tasks)})
+                elif path == "/api/publish/login":
+                    task = start_publish_login(payload.get("platform"), restart=bool(payload.get("restart")))
+                    json_response(self, {"ok": True, "task": task})
+                elif path == "/api/publish/login/check":
+                    task = check_publish_login(payload.get("login_id"))
+                    json_response(self, {"ok": True, "task": task})
                 else:
                     self.send_error(404)
         except Exception as exc:
@@ -3166,6 +6699,8 @@ class Handler(SimpleHTTPRequestHandler):
                     return
         self.send_response(200)
         self.send_header("Content-Type", ctype)
+        if ctype.startswith(("text/html", "text/javascript", "text/css")):
+            self.send_header("Cache-Control", "no-cache, must-revalidate")
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(size))
         self.end_headers()
@@ -3194,7 +6729,7 @@ class Handler(SimpleHTTPRequestHandler):
         if source.startswith("mediacrawler_"):
             platform = source.removeprefix("mediacrawler_")
             normalized, candidates, errors = search_media_crawler_candidates(keywords, platform, limit, start_at, end_at)
-            provider = f"MediaCrawler · {media_crawler_platform_label(platform)}"
+            provider = f"视频素材搜索 · {media_crawler_platform_label(platform)}"
         else:
             normalized, candidates, errors = search_video_candidates(keywords, limit, start_at, end_at)
             provider = "bing_rss"
@@ -3212,6 +6747,80 @@ class Handler(SimpleHTTPRequestHandler):
         }
         write_json(trend_search_path(search_id), result)
         json_response(self, {"ok": True, **result})
+
+    def handle_trend_discovery(self, payload):
+        if payload.get("async"):
+            task = start_trend_discovery(payload)
+            json_response(self, {"ok": True, "task": task})
+            return
+        result = discover_ai_trends(payload)
+        json_response(self, {"ok": True, **result})
+
+    def handle_trend_people(self, payload):
+        start_at = str(payload.get("start_at") or "").strip()
+        end_at = str(payload.get("end_at") or "").strip()
+        if start_at and end_at and start_at > end_at:
+            raise RuntimeError("开始日期不能晚于结束日期。")
+        pool = build_trend_person_pool(start_at, end_at)
+        json_response(self, {"ok": True, **pool})
+
+    def handle_trend_hotspots(self, payload):
+        start_at = str(payload.get("start_at") or "").strip()
+        end_at = str(payload.get("end_at") or "").strip()
+        if start_at and end_at and start_at > end_at:
+            raise RuntimeError("开始日期不能晚于结束日期。")
+        if payload.get("async"):
+            task = start_trend_hotspot_pool_build(payload)
+            json_response(self, {"ok": True, "task": task})
+            return
+        pool = build_trend_hotspot_pool(start_at, end_at, provider_id=payload.get("provider_id"))
+        json_response(self, {"ok": True, **pool})
+
+    def handle_trend_knowledge(self, payload):
+        action = str(payload.get("action") or "save").strip()
+        knowledge = trend_knowledge_store()
+        entries = knowledge["entries"]
+        if action == "delete":
+            entry_id = str(payload.get("entry_id") or "").strip()
+            before = len(entries)
+            entries[:] = [item for item in entries if item.get("entry_id") != entry_id]
+            if len(entries) == before:
+                error_response(self, "找不到该知识库记录", 404)
+                return
+            write_json(TREND_KNOWLEDGE_PATH, knowledge)
+            json_response(self, {"ok": True, "entries": entries})
+            return
+        if action == "update":
+            entry_id = str(payload.get("entry_id") or "").strip()
+            index = next((position for position, item in enumerate(entries) if item.get("entry_id") == entry_id), -1)
+            if index < 0:
+                error_response(self, "找不到该知识库记录", 404)
+                return
+            structured = structure_trend_knowledge(payload.get("note"), payload.get("provider_id"))
+            existing = entries[index]
+            updated_at = datetime.now().isoformat(timespec="seconds")
+            structured.update({
+                "entry_id": entry_id,
+                "created_at": existing.get("created_at") or updated_at,
+                "updated_at": updated_at,
+            })
+            entries[index] = structured
+            knowledge["updated_at"] = updated_at
+            write_json(TREND_KNOWLEDGE_PATH, knowledge)
+            json_response(self, {"ok": True, "entry": structured, "entries": entries})
+            return
+        if action != "save":
+            error_response(self, "未知知识库操作", 400)
+            return
+        structured = structure_trend_knowledge(payload.get("note"), payload.get("provider_id"))
+        structured.update({
+            "entry_id": f"taste-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        })
+        entries.append(structured)
+        knowledge["updated_at"] = structured["created_at"]
+        write_json(TREND_KNOWLEDGE_PATH, knowledge)
+        json_response(self, {"ok": True, "entry": structured, "entries": entries})
 
     def handle_trend_import(self, payload):
         search_id = str(payload.get("search_id") or "").strip()
@@ -3274,6 +6883,9 @@ class Handler(SimpleHTTPRequestHandler):
                 "entered_task_center": True,
             }
             meta.update(probe_video(source))
+            duration = float(meta.get("duration") or 0)
+            if duration > 0:
+                meta["transcription_range"] = {"start": 0, "end": round(duration, 3), "duration": round(duration, 3)}
             write_json(base_dir / "metadata.json", meta)
         preview_queued = should_make_browser_preview(ext, meta)
         message = "\u6e90\u89c6\u9891\u5df2\u4fdd\u5b58\uff0c\u6b63\u5728\u751f\u6210\u6d4f\u89c8\u5668\u517c\u5bb9\u9884\u89c8" if preview_queued else "\u6e90\u89c6\u9891\u5df2\u4fdd\u5b58\uff0c\u53ef\u5f00\u59cb\u8f6c\u5199"
@@ -3290,6 +6902,15 @@ class Handler(SimpleHTTPRequestHandler):
                 "browser_preview_queued": preview_queued,
             },
         )
+
+    def handle_publish_local_asset(self):
+        form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={"REQUEST_METHOD": "POST"})
+        item = form["file"] if "file" in form else None
+        try:
+            asset = import_publish_local_asset(item)
+            json_response(self, {"ok": True, "asset": asset})
+        except RuntimeError as exc:
+            error_response(self, str(exc), 400)
 
     def handle_browser_preview(self, payload):
         job_id = payload.get("job_id")
@@ -3422,9 +7043,9 @@ class Handler(SimpleHTTPRequestHandler):
         (job_output_dir(job_id) / "clips").mkdir(parents=True, exist_ok=True)
         params = {
             "job_id": job_id,
-            "target_clip_count": int(payload.get("target_clip_count") or 20),
-            "min_seconds": int(payload.get("min_seconds") or 8),
-            "max_seconds": int(payload.get("max_seconds") or 45),
+            "target_clip_count": int(payload.get("target_clip_count") or 5),
+            "min_seconds": int(payload.get("min_seconds") or 60),
+            "max_seconds": int(payload.get("max_seconds") or 90),
         }
         runtime_payload = dict(params)
         runtime_payload["provider_id"] = provider.get("id")
@@ -3500,7 +7121,7 @@ class Handler(SimpleHTTPRequestHandler):
                 provider["api_key"] = api_key
             if kind == "llm":
                 protocol = (payload.get("protocol") or "openai").strip().lower()
-                base_url = (payload.get("base_url") or "").strip().rstrip("/")
+                base_url = normalize_llm_base_url(payload.get("base_url"))
                 model = (payload.get("model") or "").strip()
                 if protocol not in {"openai", "anthropic"}:
                     raise RuntimeError("仅支持 OpenAI 兼容或 Anthropic Messages 协议。")
@@ -3510,14 +7131,14 @@ class Handler(SimpleHTTPRequestHandler):
             else:
                 provider.update({
                     "resource_id": (payload.get("resource_id") or "volc.seedasr.auc").strip(),
-                    "poll_interval": 5,
+                    "audio_url": (payload.get("audio_url") or "").strip(),
+                    "poll_interval": max(2, min(30, float(payload.get("poll_interval") or 5))),
                     "tos_endpoint": (payload.get("tos_endpoint") or "").strip().replace("https://", "").replace("http://", "").strip("/"),
                     "tos_region": (payload.get("tos_region") or "").strip(),
                     "tos_bucket": (payload.get("tos_bucket") or "").strip(),
                     "tos_prefix": (payload.get("tos_prefix") or "mp4-golden-asr").strip().strip("/"),
-                    "tos_url_expires": 86400,
+                    "tos_url_expires": max(60, min(7 * 24 * 3600, int(float(payload.get("tos_url_expires") or 86400)))),
                 })
-                provider.pop("audio_url", None)
                 tos_access_key = (payload.get("tos_access_key") or "").strip()
                 if tos_access_key:
                     provider["tos_access_key"] = tos_access_key
@@ -3542,80 +7163,6 @@ class Handler(SimpleHTTPRequestHandler):
             "llm": [public_provider(item, "llm") for item in saved.get("llm_providers", [])],
             "volcengine": [public_provider(item, "volcengine") for item in saved.get("volcengine_providers", [])],
         })
-
-    def handle_save_settings(self, payload):
-        """Save or clear DeepSeek, Volcengine BigModel ASR, and TOS settings."""
-        saved = read_json(SETTINGS_PATH, {})
-        action = payload.get("action")
-        if action == "clear":
-            saved.pop("deepseek_api_key", None)
-            write_json(SETTINGS_PATH, saved)
-            json_response(self, {"ok": True, "cleared": "deepseek"})
-            return
-        if action == "clear_volcengine":
-            for key in ["volcengine_api_key", "volcengine_resource_id", "volcengine_appid", "volcengine_token", "volcengine_cluster", "volcengine_audio_url", "volcengine_poll_interval"]:
-                saved.pop(key, None)
-            write_json(SETTINGS_PATH, saved)
-            json_response(self, {"ok": True, "cleared": "volcengine"})
-            return
-        if action == "clear_tos":
-            for key in ["tos_access_key", "tos_secret_key", "tos_endpoint", "tos_region", "tos_bucket", "tos_prefix", "tos_url_expires"]:
-                saved.pop(key, None)
-            write_json(SETTINGS_PATH, saved)
-            json_response(self, {"ok": True, "cleared": "tos"})
-            return
-        if "api_key" in payload and payload.get("settings_type") != "volcengine":
-            key = (payload.get("api_key") or "").strip()
-            if not key:
-                json_response(self, {"ok": False, "error": "Key 不能为空"}, 400)
-                return
-            saved["deepseek_api_key"] = key
-            write_json(SETTINGS_PATH, saved)
-            masked = f"{key[:6]}...{key[-4:]}" if len(key) > 12 else key[:6] + "..."
-            json_response(self, {"ok": True, "masked_key": masked})
-            return
-        if payload.get("settings_type") == "tos":
-            access_key = (payload.get("tos_access_key") or "").strip()
-            secret_key = (payload.get("tos_secret_key") or saved.get("tos_secret_key") or "").strip()
-            endpoint = (payload.get("tos_endpoint") or "").strip().replace("https://", "").replace("http://", "").strip("/")
-            region = (payload.get("tos_region") or "").strip()
-            bucket = (payload.get("tos_bucket") or "").strip()
-            prefix = (payload.get("tos_prefix") or "mp4-golden-asr").strip().strip("/")
-            url_expires = int(float(payload.get("tos_url_expires") or 86400))
-            if not access_key or not secret_key or not endpoint or not region or not bucket:
-                json_response(self, {"ok": False, "error": "TOS AK、SK、Endpoint、Region、Bucket 都不能为空。"}, 400)
-                return
-            saved.update({
-                "tos_access_key": access_key,
-                "tos_secret_key": secret_key,
-                "tos_endpoint": endpoint,
-                "tos_region": region,
-                "tos_bucket": bucket,
-                "tos_prefix": prefix or "mp4-golden-asr",
-                "tos_url_expires": max(60, min(7 * 24 * 3600, url_expires)),
-            })
-            write_json(SETTINGS_PATH, saved)
-            json_response(self, {"ok": True, "bucket": bucket, "endpoint": endpoint})
-            return
-        if payload.get("settings_type") == "volcengine":
-            api_key = (payload.get("volcengine_api_key") or saved.get("volcengine_api_key") or "").strip()
-            resource_id = (payload.get("volcengine_resource_id") or "volc.seedasr.auc").strip()
-            audio_url = (payload.get("volcengine_audio_url") or "").strip()
-            poll_interval = float(payload.get("volcengine_poll_interval") or 5)
-            if not api_key:
-                json_response(self, {"ok": False, "error": "火山 API Key 不能为空。"}, 400)
-                return
-            saved.update({
-                "volcengine_api_key": api_key,
-                "volcengine_resource_id": resource_id or "volc.seedasr.auc",
-                "volcengine_audio_url": audio_url,
-                "volcengine_poll_interval": max(2, min(30, poll_interval)),
-            })
-            write_json(SETTINGS_PATH, saved)
-            masked = f"{api_key[:6]}...{api_key[-4:]}" if len(api_key) > 12 else api_key[:4] + "..."
-            json_response(self, {"ok": True, "masked_token": masked, "masked_api_key": masked})
-            return
-        json_response(self, {"ok": False, "error": "未知设置类型"}, 400)
 
     def handle_render_preview(self, payload):
         job_id = payload.get("job_id")
@@ -3858,10 +7405,13 @@ class Handler(SimpleHTTPRequestHandler):
 
 def main():
     ensure_dirs()
+    remember_public_proxy_candidate()
     loaded_tasks = load_clip_tasks()
+    loaded_publish_tasks = load_publish_tasks()
+    loaded_publish_login_tasks = load_publish_login_tasks()
     os.chdir(ROOT)
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"MP4 金句片段筛选导出工作台已启动：http://{HOST}:{PORT}，已恢复 {loaded_tasks} 条任务记录")
+    print(f"MP4 金句片段筛选导出工作台已启动：http://{HOST}:{PORT}，已恢复 {loaded_tasks} 条处理任务、{loaded_publish_tasks} 条发布任务记录、{loaded_publish_login_tasks} 条登录准备记录")
     server.serve_forever()
 
 

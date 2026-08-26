@@ -1,0 +1,86 @@
+{
+  "name": "@sillyl12324/xhs-mcp",
+  "version": "2.7.0",
+  "type": "module",
+  "description": "MCP server for Xiaohongshu (小红书/RedNote) - search, publish, and interact with content",
+  "main": "dist/index.js",
+  "bin": {
+    "xhs-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "build": "tsc && npm run copy-assets",
+    "copy-assets": "node -e \"require('fs').cpSync('src/core/image-processor/prompts', 'dist/core/image-processor/prompts', {recursive: true})\"",
+    "postinstall": "npx patchright install chromium",
+    "prepublishOnly": "npm run build",
+    "start": "node dist/index.js",
+    "start:http": "node dist/index.js --http",
+    "start:bun": "bun dist/index.js",
+    "start:bun:http": "bun dist/index.js --http",
+    "test:search": "bun scripts/test-xhs.ts search",
+    "test:note": "bun scripts/test-xhs.ts note",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs",
+    "lint": "eslint src/ scripts/",
+    "lint:fix": "eslint src/ scripts/ --fix"
+  },
+  "keywords": [
+    "mcp",
+    "xiaohongshu",
+    "rednote",
+    "小红书",
+    "ai",
+    "claude",
+    "automation",
+    "playwright",
+    "model-context-protocol"
+  ],
+  "author": "ShunL12324",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShunL12324/xhs-mcp.git"
+  },
+  "homepage": "https://github.com/ShunL12324/xhs-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/ShunL12324/xhs-mcp/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@google/genai": "^1.38.0",
+    "@langchain/core": "^1.1.18",
+    "@langchain/langgraph": "^1.1.2",
+    "@modelcontextprotocol/sdk": "^1.23.0",
+    "better-sqlite3": "^12.6.2",
+    "canvas": "^3.2.1",
+    "fs-extra": "^11.3.2",
+    "hono": "^4.7.0",
+    "jsonrepair": "^3.13.2",
+    "liquidjs": "^10.24.0",
+    "patchright": "^1.57.0",
+    "patchright-core": "^1.57.0",
+    "sharp": "^0.34.5",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/bun": "^1.2.1",
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^24.10.1",
+    "eslint": "^10.0.1",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.8.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.56.0",
+    "vitepress": "^1.6.4"
+  }
+}

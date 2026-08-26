@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Playwright
+playwright-report/
+test-results/
+
+# Logs & screenshots
+*.log
+screenshots/
+
+# User data
+douyin_state.json
+*.tmp
+
+# IDE
+.vscode/
+.idea/

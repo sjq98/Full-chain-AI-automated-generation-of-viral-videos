@@ -1,0 +1,32 @@
+# Bytecode / cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 浏览器状态（包含登录 cookie 等敏感信息）
+browser_data/
+cookies/*.json
+
+# 调试日志和截图
+logs/
+*.log
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 临时文件
+*.tmp
+*.bak

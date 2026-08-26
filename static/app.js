@@ -20,9 +20,11 @@ const state = {
   draftSequence: 0,
   jobMeta: {},
   libraryItems: [],
-  taskFilter: "active",
+  taskCategory: "all",
+  dismissedTaskIds: new Set(),
   currentView: "workbench",
-  trends: { searchId: null, candidates: [], warnings: [], importTasks: {}, openedJobIds: new Set() },
+  trends: { searchId: null, topics: [], candidates: [], warnings: [], generatedQueries: [], editorialFocus: [], knowledgeEntries: [], editingKnowledgeId: null, importTasks: {}, openedJobIds: new Set(), discoveryTaskId: null, discoveryTimer: null, hotspotPoolId: null, hotspotCandidates: [], selectedHotspotIds: [] },
+  publishing: { platforms: [], assets: [], tasks: [], loginTasks: [], taskRefreshTimer: null, loginRefreshTimer: null },
   modalClipId: null,
   modalTrim: null,
   timelineFrames: [],
@@ -34,6 +36,7 @@ const state = {
   providers: { llm: [], volcengine: [] },
   providersPackaged: false,
   providerSettingsInitialized: true,
+  providerModels: [],
 };
 
 const $ = (id) => document.getElementById(id);
@@ -52,6 +55,8 @@ const el = {
   appViews: {
     trends: $("trendsView"),
     workbench: $("workbenchView"),
+    editing: $("editingView"),
+    publishing: $("publishingView"),
     providers: $("providersView"),
     "provider-list": $("providerListView"),
     tasks: $("tasksView"),
@@ -62,20 +67,56 @@ const el = {
   viewSubtitle: $("viewSubtitle"),
   workbenchTabs: $("workbenchTabs"),
   activeTaskCount: $("activeTaskCount"),
-  trendKeywords: $("trendKeywords"),
-  trendSource: $("trendSource"),
   trendDateRange: $("trendDateRange"),
-  trendLimit: $("trendLimit"),
+  trendPlatformBili: $("trendPlatformBili"),
+  trendPlatformDy: $("trendPlatformDy"),
   trendStartDate: $("trendStartDate"),
   trendEndDate: $("trendEndDate"),
   trendCustomDates: $("trendCustomDates"),
+  trendFetchPeopleButton: $("trendFetchPeopleButton"),
   trendSearchButton: $("trendSearchButton"),
+  trendPeoplePanel: $("trendPeoplePanel"),
+  trendPeopleList: $("trendPeopleList"),
+  trendPersonSelectionCount: $("trendPersonSelectionCount"),
   trendSearchStatus: $("trendSearchStatus"),
   trendResultSummary: $("trendResultSummary"),
+  trendDiscoveryProgress: $("trendDiscoveryProgress"),
+  trendDiscoveryProgressBar: $("trendDiscoveryProgressBar"),
+  trendDiscoveryProgressText: $("trendDiscoveryProgressText"),
+  trendDiscoveryProgressMessage: $("trendDiscoveryProgressMessage"),
   trendResults: $("trendResults"),
   trendProviderBadge: $("trendProviderBadge"),
-  taskFilterActive: $("taskFilterActive"),
-  taskFilterCompleted: $("taskFilterCompleted"),
+  trendKnowledgeInput: $("trendKnowledgeInput"),
+  saveTrendKnowledgeButton: $("saveTrendKnowledgeButton"),
+  cancelTrendKnowledgeEditButton: $("cancelTrendKnowledgeEditButton"),
+  trendKnowledgeStatus: $("trendKnowledgeStatus"),
+  trendKnowledgeEntries: $("trendKnowledgeEntries"),
+  trendKnowledgeSummary: $("trendKnowledgeSummary"),
+  refreshPublishAssetsButton: $("refreshPublishAssetsButton"),
+  publishLocalFileInput: $("publishLocalFileInput"),
+  selectPublishLocalVideoButton: $("selectPublishLocalVideoButton"),
+  refreshPublishTasksButton: $("refreshPublishTasksButton"),
+  publishCurrentStatus: $("publishCurrentStatus"),
+  publishCapabilityStrip: $("publishCapabilityStrip"),
+  publishAssets: $("publishAssets"),
+  publishAssetSummary: $("publishAssetSummary"),
+  publishForm: $("publishForm"),
+  douyinTitle: $("douyinTitle"),
+  douyinDescription: $("douyinDescription"),
+  douyinHashtags: $("douyinHashtags"),
+  douyinSchedule: $("douyinSchedule"),
+  channelsDescription: $("channelsDescription"),
+  channelsShortTitle: $("channelsShortTitle"),
+  channelsHashtags: $("channelsHashtags"),
+  channelsSchedule: $("channelsSchedule"),
+  xiaohongshuTitle: $("xiaohongshuTitle"),
+  xiaohongshuContent: $("xiaohongshuContent"),
+  xiaohongshuHashtags: $("xiaohongshuHashtags"),
+  xiaohongshuSchedule: $("xiaohongshuSchedule"),
+  publishFormStatus: $("publishFormStatus"),
+  createPublishPlanButton: $("createPublishPlanButton"),
+  publishTasks: $("publishTasks"),
+  taskCategoryFilters: $("taskCategoryFilters"),
   fileInput: $("fileInput"),
   previewButton: $("previewButton"),
   previewTopButton: $("previewTopButton"),
@@ -151,6 +192,9 @@ const el = {
   providerBaseUrl: $("providerBaseUrl"),
   providerProtocol: $("providerProtocol"),
   providerModel: $("providerModel"),
+  providerCustomModel: $("providerCustomModel"),
+  fetchProviderModelsButton: $("fetchProviderModelsButton"),
+  providerModelsStatus: $("providerModelsStatus"),
   providerResourceId: $("providerResourceId"),
   providerTosAccessKey: $("providerTosAccessKey"),
   providerTosSecretKey: $("providerTosSecretKey"),
@@ -307,19 +351,23 @@ async function cleanupStorage(categories) {
 }
 
 function taskTypeText(type) {
-  return { draft: "\u65b0\u5efa\u4efb\u52a1", workspace: "\u89c6\u9891\u4efb\u52a1", preview: "\u5019\u9009\u9884\u89c8", export: "\u539f\u753b\u8d28\u5bfc\u51fa", transcribe: "\u8bed\u97f3\u8f6c\u5199", analyze: "DeepSeek \u5206\u6790" }[type] || "\u540e\u53f0\u4efb\u52a1";
+  return { draft: "新建任务", workspace: "视频任务", preview: "候选预览", export: "原画质导出", transcribe: "语音转写", analyze: "金句分析", trend_search: "爆款搜索", publish: "一键发布" }[type] || "后台任务";
 }
 
 function taskStatusText(status) {
-  return { draft: "\u5f85\u5bfc\u5165\u89c6\u9891", waiting: "\u5f85\u8f6c\u5199", queued: "排队中", running: "运行中", paused: "已暂停", done: "已完成", error: "失败", cancelled: "已取消" }[status] || status || "未知";
+  return { draft: "待导入视频", waiting: "待转写", planned: "待执行", queued: "排队中", running: "运行中", paused: "已暂停", done: "已完成", succeeded: "已完成", error: "失败", cancelled: "已取消" }[status] || status || "未知";
 }
 
 function taskStatusClass(status) {
-  if (["done"].includes(status)) return "done";
+  if (["done", "succeeded"].includes(status)) return "done";
   if (["error"].includes(status)) return "error";
   if (["cancelled"].includes(status)) return "cancelled";
-  if (["draft", "waiting", "queued", "running", "paused"].includes(status)) return "running";
+  if (["draft", "waiting", "planned", "queued", "running", "paused"].includes(status)) return "running";
   return "";
+}
+
+function taskCategoryText(category) {
+  return { all: "全部", draft: "新建任务", workspace: "视频任务", preview: "候选预览", export: "导出", transcribe: "转写", analyze: "金句分析", trend: "爆款搜索", publish: "一键发布" }[category] || "其他任务";
 }
 
 function taskTitle(task) {
@@ -341,6 +389,7 @@ function draftTaskEntries() {
       type: "draft",
       status: "draft",
       message: "\u7b49\u5f85\u9009\u62e9\u89c6\u9891\u6587\u4ef6",
+      created_at: meta.created_at || null,
       virtual: true,
     };
   });
@@ -359,6 +408,7 @@ function waitingWorkspaceEntries(jobs, backgroundTasks) {
       type: "workspace",
       status: "waiting",
       message: "\u89c6\u9891\u5df2\u52a0\u5165\u4efb\u52a1\u4e2d\u5fc3\uff0c\u7b49\u5f85\u5f00\u59cb\u8f6c\u5199",
+      created_at: job.created_at || null,
       virtual: true,
     }));
 }
@@ -471,6 +521,37 @@ function formatShortTime(total) {
   const minutes = Math.floor(value / 60);
   const seconds = value % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatTaskTime(value) {
+  if (!value) return "时间未知";
+  const raw = String(value);
+  const date = new Date(raw.includes("T") ? raw : raw.replace(" ", "T"));
+  if (Number.isNaN(date.getTime())) return raw;
+  return date.toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).replace(/\//g, "-");
+}
+
+async function openTrendSearchRecord(searchId) {
+  if (!searchId) {
+    switchView("trends");
+    return;
+  }
+  try {
+    const result = await api(`/api/trends/search/results?search_id=${encodeURIComponent(searchId)}`);
+    applyTrendDiscoveryResult(result);
+    renderTrendDiscoveryProgress(null);
+    switchView("trends");
+  } catch (error) {
+    toast(`打开爆款搜索记录失败：${error.message}`);
+  }
 }
 
 function updateTranscribeStats(job = {}) {
@@ -648,6 +729,7 @@ function setPreviewButtonsDisabled(disabled) {
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
+    cache: "no-store",
     headers: options.body instanceof FormData ? options.headers : { "Content-Type": "application/json", ...(options.headers || {}) },
   });
   const raw = await response.text();
@@ -773,8 +855,9 @@ async function uploadCurrentVideo() {
     el.transcribeButton.disabled = data.metadata?.has_audio === false;
     const canMakePreview = needsBrowserPreview(data.metadata);
     setPreviewButtonsDisabled(data.browser_preview_queued || !canMakePreview);
-    const selectedStart = parseClock(el.trimStartInput?.value || 0);
-    const selectedEnd = parseClock(el.trimEndInput?.value || 0);
+    const transcriptionRange = data.metadata?.transcription_range || {};
+    const selectedStart = Number(transcriptionRange.start) || 0;
+    const selectedEnd = Number(transcriptionRange.end) || Number(data.metadata?.duration) || 0;
     showManualTrimPanel(selectedStart, selectedEnd > selectedStart ? selectedEnd : null);
     await refreshTasks();
     if (data.browser_preview_queued) {
@@ -824,7 +907,7 @@ function groupTranscriptSegments(segments = []) {
 }
 
 function switchView(view) {
-  const next = ["trends", "workbench", "providers", "provider-list", "tasks", "storage"].includes(view) ? view : "workbench";
+  const next = ["trends", "workbench", "editing", "publishing", "providers", "provider-list", "tasks", "storage"].includes(view) ? view : "workbench";
   state.currentView = next;
   Object.entries(el.appViews || {}).forEach(([key, node]) => { if (node) node.hidden = key !== next; });
   (el.navItems || []).forEach((button) => {
@@ -833,8 +916,10 @@ function switchView(view) {
     if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
   });
   const titles = {
-    trends: ["爆款搜索", "按关键词发现近期高热度视频并导入工作台"],
-    workbench: ["工作台", "转写、分析、裁剪与导出"],
+    trends: ["AI 爆款发现", "让 AI 从近期商业资讯中筛选选题与视频素材"],
+    workbench: ["金句提取", "转写、分析、裁剪与导出"],
+    editing: ["剪辑成片", "将金句片段组合为可发布成片"],
+    publishing: ["一键发布", "统一编排内容并创建多平台发布任务"],
     providers: ["供应商管理", "管理 LLM 与火山语音转写配置"],
     "provider-list": [providerKindLabel(state.providerKind) + "配置", "查看、编辑并选择当前工作台使用的配置"],
     tasks: ["任务中心", "总览所有视频的后台处理进度"],
@@ -845,6 +930,267 @@ function switchView(view) {
   if (next === "tasks") refreshTasks().catch(() => {});
   if (next === "providers" || next === "provider-list") refreshProviders().catch(() => {});
   if (next === "storage") { refreshLibrary().catch(() => {}); refreshStorage().catch(() => {}); }
+  if (next === "publishing") { refreshPublishCapabilities().catch(() => {}); refreshPublishAssets().catch(() => {}); refreshPublishTasks().catch(() => {}); refreshPublishLoginTasks().catch(() => {}); }
+}
+
+function publishPlatformName(id) {
+return ({ douyin: "抖音", xiaohongshu: "小红书", channels: "视频号" })[id] || id;
+}
+
+async function refreshPublishCapabilities() {
+  const data = await api("/api/publish/capabilities");
+  state.publishing.platforms = data.platforms || [];
+  if (!el.publishCapabilityStrip) return data.platforms || [];
+  const platformById = Object.fromEntries((data.platforms || []).map((platform) => [platform.id, platform]));
+  document.querySelectorAll("input[name='publishPlatform']").forEach((input) => {
+    const platform = platformById[input.value];
+    const unavailable = !platform?.ready;
+    input.disabled = unavailable;
+    if (unavailable) input.checked = false;
+    input.closest(".publish-platform-option")?.classList.toggle("is-unavailable", unavailable);
+    input.closest(".publish-platform-option")?.setAttribute("title", unavailable ? (platform?.label || "平台适配器尚未准备好") : "");
+  });
+  syncPublishPlatformFields();
+  el.publishCapabilityStrip.innerHTML = (data.platforms || []).map((platform) => `
+    <div class="publish-capability-item">
+      <strong>${escapeHtml(platform.name)}</strong>
+      <span class="module-state-badge">${escapeHtml(platform.label)}</span>
+      <small>${escapeHtml(platform.adapter || "未配置适配器")} · ${escapeHtml(platform.execution_mode || "unavailable")}</small>
+      <small>视频${platform.supports_video ? "✓" : "—"} · 元数据${platform.supports_metadata ? "✓" : "—"}</small>
+      <small class="publish-login-state">${escapeHtml(platform.login?.label || platform.login_hint || "")}</small>
+      ${platform.login?.active?.result?.qrCodeUrl ? `<a class="publish-qr-link" href="${escapeHtml(platform.login.active.result.qrCodeUrl)}" target="_blank" rel="noreferrer">打开扫码二维码</a>` : ""}
+      ${platform.login?.active?.login_id && platform.id === "xiaohongshu" ? `<button type="button" class="publish-login-button" data-publish-login-check="${escapeHtml(platform.login.active.login_id)}">检查登录</button>` : ""}
+${platform.adapter_present ? `<button type="button" class="publish-login-button" data-publish-login="${escapeHtml(platform.id)}">${platform.login?.active ? "重新打开登录" : (platform.login?.saved ? "打开创作者中心" : "登录准备")}</button>` : ""}
+    </div>
+  `).join("");
+  el.publishCapabilityStrip.querySelectorAll("[data-publish-login]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const platform = button.dataset.publishLogin;
+      if (!platform) return;
+      if (button.dataset.pending === "true") return;
+      button.dataset.pending = "true";
+      button.disabled = true;
+      try {
+        await api("/api/publish/login", { method: "POST", body: JSON.stringify({ platform, restart: false }) });
+        await refreshPublishLoginTasks();
+        await refreshPublishCapabilities();
+        toast(`已打开${publishPlatformName(platform)}登录准备，请在浏览器中完成登录。`);
+      } catch (error) {
+        toast(`启动登录准备失败：${error.message}`);
+        button.disabled = false;
+      } finally {
+        delete button.dataset.pending;
+      }
+    });
+  });
+  el.publishCapabilityStrip.querySelectorAll("[data-publish-login-check]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await api("/api/publish/login/check", { method: "POST", body: JSON.stringify({ login_id: button.dataset.publishLoginCheck }) });
+        await refreshPublishLoginTasks();
+        await refreshPublishCapabilities();
+      } catch (error) {
+        toast(`检查登录失败：${error.message}`);
+        button.disabled = false;
+      }
+    });
+  });
+  return data.platforms || [];
+}
+
+function selectedPublishAssetIds() {
+  return Array.from(el.publishAssets?.querySelectorAll("[data-publish-asset]:checked") || []).map((input) => input.value);
+}
+
+function selectedPublishPlatforms() {
+  return Array.from(document.querySelectorAll("input[name='publishPlatform']:checked")).map((input) => input.value);
+}
+
+function syncPublishPlatformFields() {
+  const selected = new Set(selectedPublishPlatforms());
+  document.querySelectorAll("[data-publish-platform-fields]").forEach((section) => {
+    section.hidden = !selected.has(section.dataset.publishPlatformFields);
+  });
+}
+
+function platformPublishPayloads(platforms) {
+  const payloads = {};
+  if (platforms.includes("douyin")) {
+    payloads.douyin = {
+      title: el.douyinTitle?.value.trim() || "",
+      description: el.douyinDescription?.value.trim() || "",
+      hashtags: el.douyinHashtags?.value.trim() || "",
+      schedule: el.douyinSchedule?.value || "manual_review",
+    };
+  }
+  if (platforms.includes("channels")) {
+    payloads.channels = {
+      description: el.channelsDescription?.value.trim() || "",
+      short_title: el.channelsShortTitle?.value.trim() || "",
+      hashtags: el.channelsHashtags?.value.trim() || "",
+      schedule: el.channelsSchedule?.value || "manual_review",
+    };
+  }
+  if (platforms.includes("xiaohongshu")) {
+    payloads.xiaohongshu = {
+      title: el.xiaohongshuTitle?.value.trim() || "",
+      content: el.xiaohongshuContent?.value.trim() || "",
+      hashtags: el.xiaohongshuHashtags?.value.trim() || "",
+      schedule: el.xiaohongshuSchedule?.value || "publish_now",
+    };
+  }
+  return payloads;
+}
+
+function renderPublishAssets() {
+  if (!el.publishAssets) return;
+  const assets = state.publishing.assets || [];
+  el.publishAssetSummary.textContent = `${assets.length} 个成片`;
+  if (!assets.length) {
+    el.publishAssets.className = "publish-assets publish-assets-empty";
+    el.publishAssets.textContent = "还没有可发布成片。请选择本地完整视频导入。";
+    return;
+  }
+  el.publishAssets.className = "publish-assets";
+  el.publishAssets.innerHTML = assets.map((asset) => `
+    <label class="publish-asset-row">
+      <input type="checkbox" data-publish-asset value="${escapeHtml(asset.asset_id)}" />
+      <span class="publish-asset-main"><strong>${escapeHtml(asset.title)}</strong><small>${escapeHtml(asset.source_title)} · ${formatShortTime(asset.duration)} · ${escapeHtml(asset.file)}</small></span>
+      <a class="publish-asset-link" href="${escapeHtml(asset.file_url || "#")}" target="_blank" rel="noreferrer" ${asset.file_url ? "" : "aria-disabled=\"true\""}>查看</a>
+    </label>
+  `).join("");
+}
+
+async function importPublishLocalVideo(file) {
+  if (!file) return;
+  const allowed = [".mp4", ".mov", ".m4v", ".webm"];
+  const extension = `.${String(file.name || "").split(".").pop().toLowerCase()}`;
+  if (!allowed.includes(extension)) {
+    el.publishFormStatus.textContent = "请选择 MP4、MOV、M4V 或 WebM 视频文件。";
+    return;
+  }
+  if (el.selectPublishLocalVideoButton) el.selectPublishLocalVideoButton.disabled = true;
+  el.publishFormStatus.textContent = `正在导入 ${file.name}...`;
+  try {
+    const form = new FormData();
+    form.append("file", file);
+    const data = await api("/api/publish/local-assets", { method: "POST", body: form });
+    await refreshPublishAssets();
+    const imported = data.asset?.asset_id;
+    if (imported) {
+      const checkbox = el.publishAssets?.querySelector(`[data-publish-asset="${CSS.escape(imported)}"]`);
+      if (checkbox) checkbox.checked = true;
+    }
+    el.publishFormStatus.textContent = `已导入 ${file.name}，并加入可发布成片。`;
+    toast("本地视频已加入发布列表。");
+  } catch (error) {
+    el.publishFormStatus.textContent = `导入失败：${error.message}`;
+  } finally {
+    if (el.publishLocalFileInput) el.publishLocalFileInput.value = "";
+    if (el.selectPublishLocalVideoButton) el.selectPublishLocalVideoButton.disabled = false;
+  }
+}
+
+async function refreshPublishAssets() {
+  const data = await api("/api/publish/assets");
+  state.publishing.assets = data.assets || [];
+  renderPublishAssets();
+  return state.publishing.assets;
+}
+
+function renderPublishTasks(serverCurrent = null) {
+  if (!el.publishCurrentStatus) return;
+  const tasks = state.publishing.tasks || [];
+  if (!tasks.length) {
+    el.publishCurrentStatus.className = "publish-current-status publish-current-status-empty";
+    el.publishCurrentStatus.textContent = "暂无当前发布任务。";
+    return;
+  }
+  const labels = {
+    planned: "待执行",
+    queued: "等待打开浏览器",
+    running: "正在打开发布页",
+    succeeded: "发布流程已完成",
+    error: "发布失败",
+  };
+  const taskTimeValue = (task) => {
+    const raw = String(task.updated_at || task.created_at || "");
+    const timestamp = Date.parse(raw.includes("T") ? raw : raw.replace(" ", "T"));
+    return Number.isNaN(timestamp) ? 0 : timestamp;
+  };
+  const current = serverCurrent && (!tasks.length || tasks.some((task) => task.task_id === serverCurrent.task_id))
+    ? serverCurrent
+    : [...tasks].sort((a, b) => taskTimeValue(b) - taskTimeValue(a) || String(b.task_id || "").localeCompare(String(a.task_id || "")))[0];
+  const statusLabel = labels[current.status] || current.status || "未知";
+  el.publishCurrentStatus.className = `publish-current-status ${current.status === "error" ? "is-error" : current.status === "succeeded" ? "is-done" : "is-running"}`;
+  el.publishCurrentStatus.innerHTML = `<div class="publish-current-status-head"><strong>${escapeHtml(current.platform_name || publishPlatformName(current.platform))} · ${escapeHtml(current.title || current.file || "成片")}</strong><span class="module-state-badge">${escapeHtml(statusLabel)}</span></div><div class="publish-current-status-message">${escapeHtml(current.message || "等待任务状态")}</div>${current.updated_at ? `<small>更新于 ${escapeHtml(current.updated_at)}</small>` : ""}`;
+}
+
+async function refreshPublishTasks() {
+  const data = await api("/api/publish/tasks");
+  state.publishing.tasks = data.tasks || [];
+  renderPublishTasks(data.current || state.publishing.tasks[0] || null);
+  window.clearTimeout(state.publishing.taskRefreshTimer);
+  if (state.currentView === "publishing" && state.publishing.tasks.some((task) => ["queued", "running"].includes(task.status))) {
+    state.publishing.taskRefreshTimer = window.setTimeout(() => {
+      refreshPublishTasks().catch(() => {});
+    }, 2000);
+  }
+  return state.publishing.tasks;
+}
+
+async function refreshPublishLoginTasks() {
+  const data = await api("/api/publish/login-tasks");
+  state.publishing.loginTasks = data.tasks || [];
+  if (state.currentView === "publishing" && state.publishing.loginTasks.some((task) => ["queued", "running", "waiting", "verification_required"].includes(task.status))) {
+    window.clearTimeout(state.publishing.loginRefreshTimer);
+    state.publishing.loginRefreshTimer = window.setTimeout(() => {
+      Promise.all([refreshPublishLoginTasks(), refreshPublishCapabilities()]).catch(() => {});
+    }, 4000);
+  }
+  return state.publishing.loginTasks;
+}
+
+async function createPublishPlan(event) {
+  event.preventDefault();
+  const assetIds = selectedPublishAssetIds();
+  const platforms = selectedPublishPlatforms();
+  const platformPayloads = platformPublishPayloads(platforms);
+  if (!assetIds.length) { el.publishFormStatus.textContent = "请至少选择一个成片。"; toast("请至少选择一个成片。"); return; }
+  if (!platforms.length) { el.publishFormStatus.textContent = "请至少选择一个平台。"; toast("请至少选择一个平台。"); return; }
+  el.createPublishPlanButton.disabled = true;
+  el.publishFormStatus.textContent = "正在准备发布并打开平台页面...";
+  try {
+    const data = await api("/api/publish/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        asset_ids: assetIds,
+        platforms,
+        platform_payloads: platformPayloads,
+      }),
+    });
+    const createdTasks = data.tasks || [];
+    if (!createdTasks.length) throw new Error("发布任务创建成功，但没有返回可执行任务");
+    el.publishFormStatus.textContent = `已创建 ${createdTasks.length} 条发布任务，正在启动发布页...`;
+    await refreshPublishTasks();
+    const taskIds = createdTasks.map((task) => task.task_id).filter(Boolean);
+    if (!taskIds.length) throw new Error("发布任务缺少任务 ID，无法执行");
+    const automaticPlatforms = platforms.filter((platform) => platformPayloads[platform]?.schedule === "publish_now");
+    if (automaticPlatforms.length && !window.confirm(`将自动点击${automaticPlatforms.map(publishPlatformName).join("、")}的发布按钮。确认继续吗？`)) {
+      el.publishFormStatus.textContent = "已取消自动点击，发布记录仍保留在任务中心。";
+      return;
+    }
+    await api("/api/publish/execute", { method: "POST", body: JSON.stringify({ task_ids: taskIds }) });
+    await Promise.all([refreshPublishTasks(), refreshTasks()]);
+    el.publishFormStatus.textContent = `已启动 ${taskIds.length} 个平台任务，将按顺序打开发布页。关闭或完成当前发布窗口后，下一平台会自动启动。`;
+    toast(`已启动 ${taskIds.length} 个平台任务，正在按顺序打开 Chrome。`);
+  } catch (error) {
+    el.publishFormStatus.textContent = error.message;
+    toast(`一键发布失败：${error.message}`);
+  } finally {
+    el.createPublishPlanButton.disabled = false;
+  }
 }
 
 function localDateInputValue(value) {
@@ -862,12 +1208,222 @@ function trendDateBounds() {
   return { start_at: localDateInputValue(start), end_at: localDateInputValue(end) };
 }
 
+function updateTrendHotspotSelectionUi() {
+  const selectedCount = state.trends.selectedHotspotIds.length;
+  if (el.trendPersonSelectionCount) el.trendPersonSelectionCount.textContent = `已选 ${selectedCount} / 10`;
+  if (el.trendSearchButton && !state.trends.discoveryTaskId && !state.trends.hotspotTaskId) el.trendSearchButton.disabled = !state.trends.hotspotPoolId || selectedCount === 0;
+}
+
+function renderTrendHotspots() {
+  if (!el.trendPeoplePanel || !el.trendPeopleList) return;
+  const hotspots = state.trends.hotspotCandidates || [];
+  el.trendPeoplePanel.hidden = !state.trends.hotspotPoolId;
+  el.trendPeopleList.innerHTML = "";
+  if (!hotspots.length) {
+    el.trendPeopleList.innerHTML = '<div class="trend-people-empty">当前报道中未拆分出可人工确认的热点。</div>';
+    updateTrendHotspotSelectionUi();
+    return;
+  }
+  hotspots.forEach((hotspot) => {
+    const hotspotId = String(hotspot.hotspot_id || "");
+    const selected = state.trends.selectedHotspotIds.includes(hotspotId);
+    const entities = Array.isArray(hotspot.entities) ? hotspot.entities.filter(Boolean) : [];
+    const card = document.createElement("label");
+    card.className = `trend-person-card${selected ? " selected" : ""}`;
+    card.innerHTML = `
+      <input type="checkbox" data-trend-hotspot-id="${escapeHtml(hotspotId)}"${selected ? " checked" : ""} />
+      <div class="trend-person-main">
+        <div class="trend-person-title"><strong>${escapeHtml(hotspot.title || "未命名热点")}</strong><span>${escapeHtml(hotspot.category || "其他")} · 热度 ${escapeHtml(hotspot.heat_score || 0)}</span></div>
+        ${hotspot.summary ? `<p>${escapeHtml(hotspot.summary)}</p>` : ""}
+        ${entities.length ? `<p class="trend-hotspot-entities">主体：${escapeHtml(entities.join(" · "))}</p>` : ""}
+        <details class="trend-person-evidence"><summary>查看来源报道</summary><ul><li><a href="${escapeHtml(hotspot.source_url || "#")}" target="_blank" rel="noreferrer">${escapeHtml(hotspot.source_title || "来源热点")}</a><span>${escapeHtml(hotspot.published_at || "近期")} · 热度 ${escapeHtml(hotspot.heat_score || "-")}</span><p>${escapeHtml(hotspot.evidence_excerpt || hotspot.summary || "")}</p></li></ul></details>
+      </div>`;
+    el.trendPeopleList.appendChild(card);
+  });
+  updateTrendHotspotSelectionUi();
+}
+
+function applyTrendHotspots(data) {
+  state.trends.hotspotPoolId = data.pool_id || null;
+  state.trends.hotspotCandidates = data.hotspots || [];
+  state.trends.selectedHotspotIds = [];
+  if (el.trendProviderBadge) el.trendProviderBadge.textContent = "操作指南";
+  el.trendSearchStatus.textContent = state.trends.hotspotCandidates.length
+    ? `已整理 ${data.source_count || 0} 条近期报道，并拆分出 ${state.trends.hotspotCandidates.length} 条候选热点。`
+    : `已整理 ${data.source_count || 0} 条近期报道，但未拆分出候选热点。`;
+  el.trendResultSummary.textContent = `${data.source_count || 0} 条报道 · ${state.trends.hotspotCandidates.length} 条候选热点`;
+  renderTrendHotspots();
+  if (data.warnings?.length) toast(data.warnings[0]);
+}
+
+async function fetchTrendHotspots() {
+  const bounds = trendDateBounds();
+  if (bounds.start_at && bounds.end_at && bounds.start_at > bounds.end_at) {
+    toast("开始日期不能晚于结束日期。");
+    return;
+  }
+  el.trendFetchPeopleButton.disabled = true;
+  if (el.trendSearchButton) el.trendSearchButton.disabled = true;
+  el.trendSearchStatus.textContent = "正在获取并整理候选热点...";
+  el.trendResultSummary.textContent = "";
+  clearTrendDiscoveryPoll();
+  renderTrendDiscoveryProgress({ progress: 0, percent: 0, progress_label: "热点拆分进度", message: "已提交热点整理任务" });
+  const searchToken = (state.trends.searchToken || 0) + 1;
+  state.trends.searchToken = searchToken;
+  try {
+    const data = await api("/api/trends/hotspots", { method: "POST", body: JSON.stringify({ async: true, ...bounds }) });
+    if (searchToken !== state.trends.searchToken) return;
+    const task = data.task;
+    if (!task?.task_id) throw new Error("热点整理任务未返回任务 ID");
+    state.trends.hotspotTaskId = task.task_id;
+    renderTrendDiscoveryProgress(task);
+    await pollTrendHotspots(task.task_id, searchToken);
+  } catch (err) {
+    if (searchToken !== state.trends.searchToken) return;
+    state.trends.hotspotTaskId = null;
+    state.trends.hotspotPoolId = null;
+    state.trends.hotspotCandidates = [];
+    state.trends.selectedHotspotIds = [];
+    renderTrendHotspots();
+    renderTrendDiscoveryProgress({ progress: 0, percent: 0, progress_label: "热点拆分进度", message: "任务提交失败" });
+    el.trendSearchStatus.textContent = `获取热点失败：${err.message}`;
+    toast(`获取热点失败：${err.message}`);
+  } finally {
+    el.trendFetchPeopleButton.disabled = Boolean(state.trends.hotspotTaskId);
+    updateTrendHotspotSelectionUi();
+  }
+}
+
+async function pollTrendHotspots(taskId, searchToken) {
+  clearTrendDiscoveryPoll();
+  try {
+    const data = await api(`/api/trends/hotspots/status?task_id=${encodeURIComponent(taskId)}`);
+    if (searchToken !== state.trends.searchToken || state.trends.hotspotTaskId !== taskId) return;
+    const task = data.task || {};
+    renderTrendDiscoveryProgress(task);
+    if (["queued", "running"].includes(task.status)) {
+      el.trendSearchStatus.textContent = task.message || "正在获取并整理热点...";
+      state.trends.discoveryTimer = window.setTimeout(() => pollTrendHotspots(taskId, searchToken), 800);
+      return;
+    }
+    state.trends.hotspotTaskId = null;
+    if (task.status === "done" && task.pool) {
+      applyTrendHotspots(task.pool);
+      renderTrendDiscoveryProgress(null);
+    } else {
+        throw new Error(task.message || task.error || "热点整理未返回结果");
+    }
+    if (el.trendFetchPeopleButton) el.trendFetchPeopleButton.disabled = false;
+    updateTrendHotspotSelectionUi();
+  } catch (err) {
+    if (searchToken !== state.trends.searchToken) return;
+    state.trends.hotspotTaskId = null;
+    state.trends.hotspotPoolId = null;
+    state.trends.hotspotCandidates = [];
+    state.trends.selectedHotspotIds = [];
+    renderTrendHotspots();
+    renderTrendDiscoveryProgress({ progress: 0, percent: 0, progress_label: "热点拆分进度", message: "热点拆分失败" });
+    el.trendSearchStatus.textContent = `获取热点失败：${err.message}`;
+    toast(`获取热点失败：${err.message}`);
+    if (el.trendFetchPeopleButton) el.trendFetchPeopleButton.disabled = false;
+    updateTrendHotspotSelectionUi();
+  }
+}
+
+function updateTrendHotspotSelection(hotspotId, checked) {
+  const selected = state.trends.selectedHotspotIds;
+  if (checked && !selected.includes(hotspotId)) {
+    if (selected.length >= 10) {
+      toast("最多只能选择 10 条热点。");
+      renderTrendHotspots();
+      return;
+    }
+    selected.push(hotspotId);
+  } else if (!checked) {
+    state.trends.selectedHotspotIds = selected.filter((id) => id !== hotspotId);
+  }
+  renderTrendHotspots();
+}
+
+function clearTrendDiscoveryPoll() {
+  if (state.trends.discoveryTimer) {
+    window.clearTimeout(state.trends.discoveryTimer);
+    state.trends.discoveryTimer = null;
+  }
+}
+
+function renderTrendDiscoveryProgress(task) {
+  if (!el.trendDiscoveryProgress) return;
+  if (!task) {
+    el.trendDiscoveryProgress.hidden = true;
+    return;
+  }
+  const percent = Math.max(0, Math.min(100, Number(task.percent ?? Math.round((task.progress || 0) * 100))));
+  el.trendDiscoveryProgress.hidden = false;
+  if (el.trendDiscoveryProgressBar) el.trendDiscoveryProgressBar.style.width = `${percent}%`;
+  el.trendDiscoveryProgress?.querySelector(".trend-discovery-progress-track")?.setAttribute("aria-valuenow", String(percent));
+  if (el.trendDiscoveryProgressText) el.trendDiscoveryProgressText.textContent = `${task.progress_label || "发现进度"} ${percent}%`;
+  if (el.trendDiscoveryProgressMessage) el.trendDiscoveryProgressMessage.textContent = task.message || "正在处理";
+}
+
+function applyTrendDiscoveryResult(data) {
+  state.trends.searchId = data.search_id;
+  state.trends.topics = data.topics || [];
+  state.trends.candidates = data.candidates || [];
+  state.trends.generatedQueries = data.generated_queries || [];
+  state.trends.editorialFocus = data.editorial_focus || [];
+  state.trends.warnings = data.warnings || [];
+  if (el.trendProviderBadge) el.trendProviderBadge.textContent = "操作指南";
+  const requested = Number(data.requested_count || state.trends.selectedHotspotIds.length || 0);
+  const found = data.topics?.length || 0;
+  const withMaterials = (data.topics || []).filter((topic) => (topic.materials || []).length > 0).length;
+  el.trendSearchStatus.textContent = `已为 ${found}/${requested} 条所选热点生成选题，其中 ${withMaterials} 条找到视频素材。`;
+  el.trendResultSummary.textContent = `${found}/${requested} 个选题 · ${data.candidates?.length || 0} 条素材`;
+  renderTrendResults();
+  if (data.warnings?.length) toast(data.warnings[0]);
+}
+
+async function pollTrendDiscovery(taskId, searchToken) {
+  clearTrendDiscoveryPoll();
+  try {
+    const data = await api(`/api/trends/discover/status?task_id=${encodeURIComponent(taskId)}`);
+    if (searchToken !== state.trends.searchToken || state.trends.discoveryTaskId !== taskId) return;
+    const task = data.task || {};
+    renderTrendDiscoveryProgress(task);
+    if (["queued", "running"].includes(task.status)) {
+      el.trendSearchStatus.textContent = task.message || "AI 正在发现近期爆款...";
+      state.trends.discoveryTimer = window.setTimeout(() => pollTrendDiscovery(taskId, searchToken), 1000);
+      return;
+    }
+    state.trends.discoveryTaskId = null;
+    if (task.status === "done" && task.search_id) {
+      const result = await api(`/api/trends/search/results?search_id=${encodeURIComponent(task.search_id)}`);
+      if (searchToken === state.trends.searchToken) applyTrendDiscoveryResult(result);
+    } else if (task.status === "error") {
+      state.trends.searchId = null;
+      state.trends.topics = [];
+      state.trends.candidates = [];
+      renderTrendResults();
+      el.trendSearchStatus.textContent = `AI 发现失败：${task.message || task.error || "未知错误"}`;
+      toast(`AI 发现失败：${task.message || task.error || "未知错误"}`);
+    }
+    updateTrendHotspotSelectionUi();
+  } catch (err) {
+    if (searchToken !== state.trends.searchToken) return;
+    state.trends.discoveryTaskId = null;
+    renderTrendDiscoveryProgress({ progress: 0, percent: 0, message: "进度查询失败" });
+    updateTrendHotspotSelectionUi();
+    el.trendSearchStatus.textContent = `AI 发现失败：${err.message}`;
+    toast(`AI 发现失败：${err.message}`);
+  }
+}
+
 function trendTaskForCandidate(candidateId) {
   return Object.values(state.trends.importTasks || {}).find((task) => task.candidate_id === candidateId) || null;
 }
 
 function trendImportLabel(task) {
-  if (!task) return "导入工作台";
+  if (!task) return "导入金句提取";
   if (task.status === "queued") return "等待下载";
   if (task.status === "running") return task.stage === "creating_job" ? "正在进入工作台" : "正在下载";
   if (task.status === "done") return "已进入工作台";
@@ -882,75 +1438,130 @@ function trendImportProgressText(task) {
   return `${percent}% · ${task.message || "正在处理"}`;
 }
 
-function selectedTrendCandidateIds() {
-  if (!el.trendResults) return [];
-  return Array.from(el.trendResults.querySelectorAll("[data-trend-candidate]:checked")).map((input) => input.value);
-}
-
 function renderTrendResults() {
   if (!el.trendResults) return;
-  const candidates = state.trends.candidates || [];
-  if (!candidates.length) {
-    el.trendResults.className = "trend-results trend-results-empty";
+  const topics = state.trends.topics || [];
+  if (!topics.length) {
+    el.trendResults.className = "trend-topic-grid trend-results-empty";
     el.trendResults.textContent = state.trends.searchId
-      ? (state.trends.warnings?.[0] || "没有找到可显示的候选视频。可以调整关键词或时间范围后重试。")
-      : "搜索结果会在这里出现。";
+      ? (state.trends.warnings?.[0] || "当前资讯中暂未找到符合偏好的选题，请稍后重试。")
+      : "AI 会在这里给出选题、证据来源与视频素材。";
     return;
   }
-  el.trendResults.className = "trend-results";
-  el.trendResults.innerHTML = `
-    <div class="trend-result-head"><span></span><span>视频</span><span>平台</span><span>发布时间</span><span>评分</span><span></span></div>
-  `;
-  candidates.forEach((candidate) => {
-    const task = trendTaskForCandidate(candidate.candidate_id);
-    const locked = ["queued", "running", "done"].includes(task?.status);
-    const row = document.createElement("div");
-    row.className = `trend-result-row ${candidate.selected ? "selected" : ""}`;
-    row.innerHTML = `
-      <label><input type="checkbox" data-trend-candidate value="${escapeHtml(candidate.candidate_id)}" ${candidate.selected ? "checked" : ""} ${locked ? "disabled" : ""} aria-label="选择视频" /></label>
-      <div class="trend-result-main"><strong class="trend-result-title">${escapeHtml(candidate.title)}</strong><span class="trend-result-description">${escapeHtml(candidate.description || "搜索结果未提供简介")}</span><a class="trend-result-link" href="${escapeHtml(candidate.url)}" target="_blank" rel="noopener noreferrer" title="打开原视频网页">${escapeHtml(candidate.url)}</a></div>
-      <span class="trend-platform">${escapeHtml(candidate.platform || "网页视频")}</span>
-      <span class="trend-published">${escapeHtml(candidate.published_at || "未提供")}</span>
-      <span class="trend-score">${Math.round(Number(candidate.heat_score || 0))}</span>
-      <span class="trend-result-actions"><button type="button" data-trend-import="${escapeHtml(candidate.candidate_id)}" ${locked ? "disabled" : ""} ${task?.status === "error" && task.message ? `title="${escapeHtml(task.message)}"` : ""}>${trendImportLabel(task)}</button>${task ? `<small class="trend-import-progress">${escapeHtml(trendImportProgressText(task))}</small>` : ""}</span>
+  el.trendResults.className = "trend-topic-grid";
+  el.trendResults.innerHTML = "";
+  topics.forEach((topic) => {
+    const card = document.createElement("article");
+    card.className = "trend-topic-card";
+    const materials = topic.materials || [];
+    const subjectLabel = topic.subject_label || topic.speaker_name || "热点主体待核对";
+    const subjectDetail = topic.speaker_role || topic.category || "热点";
+    card.innerHTML = `
+      <div class="trend-topic-head"><div><span class="trend-topic-category">${escapeHtml(topic.category || "商业热点")}</span><h3>${escapeHtml(topic.title || "未命名选题")}</h3></div><span class="trend-confidence ${topic.source_confidence === "high" ? "high" : "medium"}">${topic.source_confidence === "high" ? "高置信度" : "待核对"}</span></div>
+      <div class="trend-topic-meta"><strong>${escapeHtml(subjectLabel)}</strong><span>${escapeHtml(subjectDetail)}</span><span>${escapeHtml(topic.published_at || "近期")}</span></div>
+      <p class="trend-topic-summary">${escapeHtml(topic.statement_summary || "")}</p>
+      <div class="trend-topic-reason"><strong>为什么值得做</strong><span>${escapeHtml(topic.heat_reason || topic.recommendation_reason || "")}</span></div>
+      <div class="trend-topic-evidence"><strong>来源证据</strong><span>${escapeHtml(topic.evidence_excerpt || "")}</span><a href="${escapeHtml(topic.source_url || "#")}" target="_blank" rel="noopener noreferrer">${escapeHtml(topic.source_title || topic.source_url || "打开来源")}</a></div>
+      <div class="trend-material-list"><div class="trend-material-list-head"><strong>视频素材</strong><span>${materials.length} 条</span></div></div>
     `;
-    row.querySelector("[data-trend-candidate]")?.addEventListener("change", (event) => {
-      candidate.selected = event.currentTarget.checked;
-      row.classList.toggle("selected", candidate.selected);
-      updateTrendSelectionSummary();
-    });
-    row.querySelector("[data-trend-import]")?.addEventListener("click", () => importTrendCandidates([candidate.candidate_id]));
-    el.trendResults.appendChild(row);
+    const list = card.querySelector(".trend-material-list");
+    if (materials.length) {
+      materials.forEach((candidate) => {
+        const task = trendTaskForCandidate(candidate.candidate_id);
+        const locked = ["queued", "running", "done"].includes(task?.status);
+        const item = document.createElement("div");
+        item.className = "trend-material-card";
+        item.innerHTML = `<div class="trend-material-main"><div><span class="trend-source-grade grade-${escapeHtml(String(candidate.source_grade || "C").toLowerCase())}">${escapeHtml(candidate.source_grade || "C")}</span><strong>${escapeHtml(candidate.title || "视频素材")}</strong></div><span>${escapeHtml(candidate.platform || "平台视频")} · ${Math.round(Number(candidate.material_score || 0))} 分</span><small>${escapeHtml(candidate.material_reason || candidate.description || "")}</small><a href="${escapeHtml(candidate.url || "#")}" target="_blank" rel="noopener noreferrer">${escapeHtml(candidate.url || "打开视频地址")}</a></div><div class="trend-material-actions"><button type="button" data-trend-import="${escapeHtml(candidate.candidate_id)}" ${locked ? "disabled" : ""}>${trendImportLabel(task)}</button>${task ? `<small>${escapeHtml(trendImportProgressText(task))}</small>` : ""}</div>`;
+        item.querySelector("[data-trend-import]")?.addEventListener("click", () => importTrendCandidates([candidate.candidate_id]));
+        list.appendChild(item);
+      });
+    }
+    el.trendResults.appendChild(card);
   });
-  const footer = document.createElement("div");
-  footer.className = "trend-import-bar";
-  footer.innerHTML = `<span id="trendImportSelection">已选择 0 个视频</span><button id="trendImportSelected" class="primary" type="button">导入已选择视频</button>`;
-  footer.querySelector("#trendImportSelected")?.addEventListener("click", () => importTrendCandidates(selectedTrendCandidateIds()));
-  el.trendResults.appendChild(footer);
-  updateTrendSelectionSummary();
 }
 
-function updateTrendSelectionSummary() {
-  const selection = document.getElementById("trendImportSelection");
-  if (selection) selection.textContent = `已选择 ${selectedTrendCandidateIds().length} 个视频`;
+function renderKnowledgeEntries() {
+  if (!el.trendKnowledgeEntries) return;
+  const entries = state.trends.knowledgeEntries || [];
+  if (el.trendKnowledgeSummary) el.trendKnowledgeSummary.textContent = `${entries.length} 条偏好`;
+  el.trendKnowledgeEntries.innerHTML = entries.length ? entries.map((entry) => `<div class="trend-knowledge-entry"><div><strong>${escapeHtml(entry.title || "未命名主题")}</strong><span>${escapeHtml((entry.themes || []).slice(0, 4).join(" · ") || entry.summary || "已结构化")}</span></div><div class="trend-knowledge-entry-actions"><button type="button" data-knowledge-edit="${escapeHtml(entry.entry_id)}" aria-label="编辑知识库记录">编辑</button><button type="button" data-knowledge-delete="${escapeHtml(entry.entry_id)}" aria-label="删除知识库记录">删除</button></div></div>`).join("") : `<div class="trend-knowledge-empty">还没有偏好记录。先写一段往期主题，AI 会自动提炼标签。</div>`;
+}
+
+function findTrendKnowledgeEntry(entryId) {
+  const normalizedId = String(entryId ?? "");
+  return (state.trends.knowledgeEntries || []).find((item) => String(item.entry_id ?? "") === normalizedId);
+}
+
+async function loadTrendKnowledge() {
+  const data = await api("/api/trends/knowledge");
+  state.trends.knowledgeEntries = data.entries || [];
+  renderKnowledgeEntries();
+}
+
+function resetTrendKnowledgeEditor() {
+  state.trends.editingKnowledgeId = null;
+  if (el.trendKnowledgeInput) el.trendKnowledgeInput.value = "";
+  if (el.saveTrendKnowledgeButton) el.saveTrendKnowledgeButton.textContent = "让 AI 结构化保存";
+  if (el.cancelTrendKnowledgeEditButton) el.cancelTrendKnowledgeEditButton.hidden = true;
+  if (el.trendKnowledgeStatus) el.trendKnowledgeStatus.textContent = "";
+}
+
+function editTrendKnowledge(entryId) {
+  const entry = findTrendKnowledgeEntry(entryId);
+  if (!entry) return;
+  state.trends.editingKnowledgeId = String(entry.entry_id ?? entryId);
+  if (el.trendKnowledgeInput) {
+    el.trendKnowledgeInput.value = entry.raw_note || entry.source_note || entry.summary || entry.title || "";
+    el.trendKnowledgeInput.focus();
+  }
+  if (el.saveTrendKnowledgeButton) el.saveTrendKnowledgeButton.textContent = "保存知识库修改";
+  if (el.cancelTrendKnowledgeEditButton) el.cancelTrendKnowledgeEditButton.hidden = false;
+  if (el.trendKnowledgeStatus) el.trendKnowledgeStatus.textContent = "正在编辑这条偏好，保存后会重新提炼标签。";
+}
+
+async function saveTrendKnowledge() {
+  const note = (el.trendKnowledgeInput?.value || "").trim();
+  if (!note) { toast("请先填写一段往期主题或选题偏好。"); el.trendKnowledgeInput?.focus(); return; }
+  el.saveTrendKnowledgeButton.disabled = true;
+  if (el.trendKnowledgeStatus) el.trendKnowledgeStatus.textContent = "AI 正在提炼偏好标签...";
+  try {
+    const editingId = state.trends.editingKnowledgeId;
+    const data = await api("/api/trends/knowledge", { method: "POST", body: JSON.stringify({ action: editingId ? "update" : "save", entry_id: editingId || undefined, note }) });
+    state.trends.knowledgeEntries = data.entries || [];
+    resetTrendKnowledgeEditor();
+    renderKnowledgeEntries();
+    if (el.trendKnowledgeStatus) {
+      el.trendKnowledgeStatus.textContent = data.entry?.structure_source === "fallback"
+        ? "已保存原始偏好，但当前 LLM 暂时不可连接；修复网络后可重新录入让 AI 提炼标签。"
+        : (editingId ? "已更新，下一次 AI 发现会参考这条偏好。" : "已保存，下一次 AI 发现会参考这条偏好。");
+    }
+  } catch (err) { if (el.trendKnowledgeStatus) el.trendKnowledgeStatus.textContent = err.message; toast(`知识库保存失败：${err.message}`); }
+  finally { el.saveTrendKnowledgeButton.disabled = false; }
+}
+
+async function deleteTrendKnowledge(entryId) {
+  try { const data = await api("/api/trends/knowledge", { method: "POST", body: JSON.stringify({ action: "delete", entry_id: entryId }) }); state.trends.knowledgeEntries = data.entries || []; renderKnowledgeEntries(); }
+  catch (err) { toast(`删除失败：${err.message}`); }
 }
 
 function clearTrendSearchResults() {
+  clearTrendDiscoveryPoll();
+  state.trends.discoveryTaskId = null;
   state.trends.searchToken = (state.trends.searchToken || 0) + 1;
   state.trends.searchId = null;
+  state.trends.topics = [];
   state.trends.candidates = [];
   state.trends.warnings = [];
-  if (el.trendSearchButton) el.trendSearchButton.disabled = false;
-  if (el.trendSearchStatus) el.trendSearchStatus.textContent = "输入关键词后开始搜索。";
+  updateTrendHotspotSelectionUi();
+  renderTrendDiscoveryProgress(null);
+  if (el.trendSearchStatus) el.trendSearchStatus.textContent = "请选择热点，再搜索视频素材。";
   if (el.trendResultSummary) el.trendResultSummary.textContent = "";
   renderTrendResults();
 }
 
 async function runTrendSearch() {
-  const keywords = (el.trendKeywords?.value || "").trim();
-  if (!keywords) {
-    toast("请先输入至少一个关键词。");
-    el.trendKeywords?.focus();
+  if (!state.trends.hotspotPoolId || !state.trends.selectedHotspotIds.length) {
+    toast("请先获取并选择至少 1 条候选热点。");
     return;
   }
   const bounds = trendDateBounds();
@@ -959,33 +1570,36 @@ async function runTrendSearch() {
     return;
   }
   el.trendSearchButton.disabled = true;
-  el.trendSearchStatus.textContent = "正在搜索视频网页并整理候选清单...";
+  el.trendSearchStatus.textContent = `AI 正在为 ${state.trends.selectedHotspotIds.length} 条所选热点生成检索词并寻找视频素材...`;
   el.trendResultSummary.textContent = "";
+  clearTrendDiscoveryPoll();
+  renderTrendDiscoveryProgress({ progress: 0, percent: 0, message: "已提交 AI 爆款发现任务" });
   const searchToken = (state.trends.searchToken || 0) + 1;
   state.trends.searchToken = searchToken;
   try {
-    const data = await api("/api/trends/search", {
+    const data = await api("/api/trends/discover", {
       method: "POST",
-      body: JSON.stringify({ keywords, source: el.trendSource?.value || "web", limit: Number(el.trendLimit?.value || 10), ...bounds }),
+      body: JSON.stringify({ async: true, hotspot_pool_id: state.trends.hotspotPoolId, hotspot_ids: state.trends.selectedHotspotIds, platforms: [el.trendPlatformBili?.checked ? "bili" : "", el.trendPlatformDy?.checked ? "dy" : ""].filter(Boolean), ...bounds }),
     });
     if (searchToken !== state.trends.searchToken) return;
-    state.trends.searchId = data.search_id;
-    state.trends.candidates = (data.candidates || []).map((candidate) => ({ ...candidate, selected: false }));
-    state.trends.warnings = data.warnings || [];
-    if (el.trendProviderBadge) el.trendProviderBadge.textContent = data.provider === "bing_rss" ? "Bing 视频搜索" : data.provider || "视频搜索";
-    el.trendSearchStatus.textContent = data.candidates?.length ? "已找到候选视频，可打开网页核对后选择导入。" : "没有找到候选视频，请尝试更具体的关键词。";
-    el.trendResultSummary.textContent = `${data.candidates?.length || 0} 个候选`;
-    renderTrendResults();
-    if (data.warnings?.length) toast(data.warnings[0]);
+    const task = data.task;
+    if (!task?.task_id) throw new Error("AI 爆款发现任务未返回任务 ID");
+    state.trends.discoveryTaskId = task.task_id;
+    renderTrendDiscoveryProgress(task);
+    await pollTrendDiscovery(task.task_id, searchToken);
   } catch (err) {
     if (searchToken !== state.trends.searchToken) return;
+    state.trends.discoveryTaskId = null;
     state.trends.searchId = null;
+    state.trends.topics = [];
+    state.trends.topics = [];
     state.trends.candidates = [];
     renderTrendResults();
-    el.trendSearchStatus.textContent = `搜索失败：${err.message}`;
-    toast(`视频搜索失败：${err.message}`);
+    renderTrendDiscoveryProgress({ progress: 0, percent: 0, message: "任务提交失败" });
+    el.trendSearchStatus.textContent = `AI 发现失败：${err.message}`;
+    toast(`AI 发现失败：${err.message}`);
   } finally {
-    if (searchToken === state.trends.searchToken) el.trendSearchButton.disabled = false;
+    if (searchToken === state.trends.searchToken && !state.trends.discoveryTaskId) updateTrendHotspotSelectionUi();
   }
 }
 
@@ -1328,7 +1942,7 @@ function showManualTrimPanel(defaultStart = null, defaultEnd = null) {
   if (!el.sourceTrimPanel) return;
   const start = defaultStart == null ? Math.max(0, el.sourceVideo.currentTime || 0) : Math.max(0, Number(defaultStart) || 0);
   const duration = trimVideoDuration();
-  const fallbackEnd = Math.min(duration || start + 15, start + 15);
+  const fallbackEnd = duration || start + 15;
   let end = fallbackEnd;
   if (defaultEnd != null && Number(defaultEnd) > start + 0.08) {
     end = Math.min(Number(defaultEnd), duration || Number(defaultEnd));
@@ -1651,170 +2265,18 @@ async function reloadTranscript() {
 }
 
 function resetAnalyzeControls() {
-  el.clipCount.value = 20;
-  el.minSeconds.value = 8;
-  el.maxSeconds.value = 45;
+  el.clipCount.value = 5;
+  el.minSeconds.value = 60;
+  el.maxSeconds.value = 90;
   el.analyzeStatus.textContent = "";
   toast("分析参数已重置。");
 }
-async function refreshSettings() {
-  return refreshProviders();
-}
-
-async function legacyRefreshSettings() {
-  try {
-    const data = await api("/api/settings");
-    el.keyState.textContent = data.has_key ? `已保存 ${data.masked_key}` : "未保存 Key";
-    if (data.has_key && !el.apiKey.value) {
-      el.apiKey.value = "";
-      el.apiKey.placeholder = "已保存（隐藏）";
-    }
-    const volc = data.volcengine || {};
-    if (el.volcengineState) {
-      const hasVolcKey = Boolean(volc.has_api_key || volc.has_token);
-      el.volcengineState.textContent = hasVolcKey ? "火山已配置" : "火山未配置";
-      el.volcengineState.className = hasVolcKey ? "ready" : "missing";
-      el.volcengineResourceId.value = volc.resource_id || "volc.seedasr.auc";
-      el.volcengineAudioUrl.value = volc.audio_url || "";
-      el.volcenginePollInterval.value = volc.poll_interval || 5;
-      if (hasVolcKey && !el.volcengineApiKey.value) el.volcengineApiKey.placeholder = "已保存（隐藏）";
-    }
-    const tos = data.tos || {};
-    if (el.tosState) {
-      el.tosState.textContent = tos.bucket ? "TOS已配置" : "TOS未配置";
-      el.tosState.className = tos.bucket ? "ready" : "missing";
-      el.tosAccessKey.value = tos.access_key || "";
-      el.tosEndpoint.value = tos.endpoint || "";
-      el.tosRegion.value = tos.region || "";
-      el.tosBucket.value = tos.bucket || "";
-      el.tosPrefix.value = tos.prefix || "mp4-golden-asr";
-      el.tosUrlExpires.value = tos.url_expires || 86400;
-      if (tos.has_secret && !el.tosSecretKey.value) el.tosSecretKey.placeholder = "已保存（隐藏）";
-    }
-  } catch {
-    el.keyState.textContent = "Key 状态未知";
-    if (el.volcengineState) el.volcengineState.textContent = "火山状态未知";
-  }
-}
-
-// Auto-save key on input blur — no need to click analyze first
-if (el.apiKey) el.apiKey.addEventListener("blur", async () => {
-  const key = el.apiKey.value.trim();
-  if (!key || !key.startsWith("sk-")) return;
-  try {
-    const res = await api("/api/settings", {
-      method: "POST",
-      body: JSON.stringify({ api_key: key }),
-    });
-    await refreshSettings();
-    if (res.ok) toast("Key 已保存。");
-  } catch (e) {
-    toast("Key 保存失败：" + e.message);
-  }
-});
-
-// Explicit save button — more reliable than blur
-if (el.saveKeyButton) el.saveKeyButton.addEventListener("click", async () => {
-  const key = el.apiKey.value.trim();
-  if (!key || !key.startsWith("sk-")) {
-    toast("请先填写有效的 DeepSeek API Key（以 sk- 开头）");
-    return;
-  }
-  try {
-    const res = await api("/api/settings", {
-      method: "POST",
-      body: JSON.stringify({ api_key: key }),
-    });
-    await refreshSettings();
-    el.saveKeyButton.textContent = "已保存 ✓";
-    toast("Key 已保存。");
-    setTimeout(() => { el.saveKeyButton.textContent = "保存 Key"; }, 2000);
-  } catch (e) {
-    toast("保存失败：" + e.message);
-  }
-});
-
-// Clear key button
-if (el.clearKeyButton) el.clearKeyButton.addEventListener("click", async () => {
-  try {
-    await api("/api/settings", {
-      method: "POST",
-      body: JSON.stringify({ action: "clear" }),
-    });
-    el.apiKey.value = "";
-    el.apiKey.placeholder = "sk-...";
-    await refreshSettings();
-    toast("Key 已清除。");
-  } catch (e) {
-    toast("清除失败：" + e.message);
-  }
-});
-
-
 function syncTranscribeEngineUI() {
   if (el.transcribeEngine) el.transcribeEngine.value = "volcengine_bigmodel";
   if (el.cloudTranscribeOptions) el.cloudTranscribeOptions.hidden = false;
 }
 
-function currentVolcenginePayload() {
-  return {
-    volcengine_api_key: el.volcengineApiKey?.value?.trim() || "",
-    volcengine_resource_id: el.volcengineResourceId?.value?.trim() || "volc.seedasr.auc",
-    volcengine_audio_url: el.volcengineAudioUrl?.value?.trim() || "",
-    volcengine_poll_interval: Number(el.volcenginePollInterval?.value || 5),
-  };
-}
-
-function currentTosPayload() {
-  return {
-    tos_access_key: el.tosAccessKey?.value?.trim() || "",
-    tos_secret_key: el.tosSecretKey?.value?.trim() || "",
-    tos_endpoint: el.tosEndpoint?.value?.trim() || "",
-    tos_region: el.tosRegion?.value?.trim() || "",
-    tos_bucket: el.tosBucket?.value?.trim() || "",
-    tos_prefix: el.tosPrefix?.value?.trim() || "mp4-golden-asr",
-    tos_url_expires: Number(el.tosUrlExpires?.value || 86400),
-  };
-}
-
-async function saveCloudConfig() {
-  await api("/api/settings", { method: "POST", body: JSON.stringify({ settings_type: "volcengine", ...currentVolcenginePayload() }) });
-  await api("/api/settings", { method: "POST", body: JSON.stringify({ settings_type: "tos", ...currentTosPayload() }) });
-}
-
 if (el.transcribeEngine) el.transcribeEngine.addEventListener("change", syncTranscribeEngineUI);
-if (el.saveAllCloudButton) {
-  el.saveAllCloudButton.addEventListener("click", async () => {
-    try {
-      el.saveAllCloudButton.disabled = true;
-      el.saveAllCloudButton.textContent = "正在保存...";
-      await saveCloudConfig();
-      await refreshSettings();
-      toast("火山/TOS 配置已保存。");
-    } catch (e) {
-      toast("配置保存失败：" + e.message);
-    } finally {
-      el.saveAllCloudButton.disabled = false;
-      el.saveAllCloudButton.textContent = "保存火山/TOS 配置";
-    }
-  });
-}
-if (el.clearVolcengineButton) {
-  el.clearVolcengineButton.addEventListener("click", async () => {
-    await api("/api/settings", { method: "POST", body: JSON.stringify({ action: "clear_volcengine" }) });
-    if (el.volcengineApiKey) el.volcengineApiKey.value = "";
-    await refreshSettings();
-    toast("火山配置已清除。");
-  });
-}
-if (el.clearTosButton) {
-  el.clearTosButton.addEventListener("click", async () => {
-    await api("/api/settings", { method: "POST", body: JSON.stringify({ action: "clear_tos" }) });
-    [el.tosAccessKey, el.tosSecretKey, el.tosEndpoint, el.tosRegion, el.tosBucket].forEach((input) => { if (input) input.value = ""; });
-    await refreshSettings();
-    toast("TOS 配置已清除。");
-  });
-}
 
 function providerKindLabel(kind) {
   return kind === "volcengine" ? "火山" : "LLM";
@@ -1833,6 +2295,59 @@ function activeLlmModelLabel() {
   return provider?.model || provider?.name || "LLM";
 }
 
+function currentProviderModel() {
+  if (!el.providerModel) return "";
+  return el.providerModel.value === "__custom__"
+    ? (el.providerCustomModel?.value || "").trim()
+    : el.providerModel.value.trim();
+}
+
+function syncProviderModelControl() {
+  const isLlm = el.providerKind?.value === "llm";
+  const custom = isLlm && el.providerModel?.value === "__custom__";
+  if (el.providerModel) el.providerModel.required = isLlm;
+  if (el.providerCustomModel) el.providerCustomModel.hidden = !custom;
+  if (el.providerCustomModel) el.providerCustomModel.required = custom;
+}
+
+function renderProviderModelOptions(models = [], selected = "") {
+  if (!el.providerModel) return;
+  const options = [...new Set((models || []).map((model) => String(model || "").trim()).filter(Boolean))];
+  if (selected && !options.includes(selected)) options.unshift(selected);
+  el.providerModel.innerHTML = `<option value="">请选择模型</option>${options.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join("")}<option value="__custom__">手动输入其他模型 ID</option>`;
+  el.providerModel.value = selected && options.includes(selected) ? selected : (selected ? "__custom__" : "");
+  if (el.providerCustomModel) el.providerCustomModel.value = selected && !options.includes(selected) ? selected : "";
+  syncProviderModelControl();
+}
+
+async function fetchProviderModels() {
+  if (!el.fetchProviderModelsButton) return;
+  const button = el.fetchProviderModelsButton;
+  const selected = currentProviderModel();
+  button.disabled = true;
+  if (el.providerModelsStatus) el.providerModelsStatus.textContent = "正在读取模型列表...";
+  try {
+    const data = await api("/api/providers/models", {
+      method: "POST",
+      body: JSON.stringify({
+        provider_id: el.providerId?.value || "",
+        name: el.providerName?.value.trim() || "LLM",
+        api_key: el.providerApiKey?.value.trim() || "",
+        base_url: el.providerBaseUrl?.value.trim() || "",
+        protocol: el.providerProtocol?.value || "openai",
+      }),
+    });
+    state.providerModels = data.models || [];
+    renderProviderModelOptions(state.providerModels, selected);
+    if (el.providerModelsStatus) el.providerModelsStatus.textContent = `已获取 ${state.providerModels.length} 个模型。`;
+  } catch (error) {
+    if (el.providerModelsStatus) el.providerModelsStatus.textContent = error.message;
+    toast(`获取模型列表失败：${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function renderProviderList() {
   const kind = state.providerKind;
   const items = state.providers[kind] || [];
@@ -1848,13 +2363,28 @@ function renderProviderList() {
     return;
   }
   const modelLabel = kind === "llm" ? "模型" : "服务";
-  el.providerList.innerHTML = `<div class="provider-table"><div class="provider-row provider-head"><span>名称</span><span>状态</span><span>${modelLabel}</span><span>操作</span></div>${items.map((item) => `<div class="provider-row"><span><strong>${escapeHtml(item.name)}</strong><small>${kind === "llm" ? escapeHtml(providerProtocolLabel(item.protocol)) : `Resource ID: ${escapeHtml(item.resource_id || "volc.seedasr.auc")}`}</small></span><span><span class="provider-status ${item.enabled ? "enabled" : "disabled"}">${item.enabled ? "已启用" : "已禁用"}</span></span><span>${escapeHtml(kind === "llm" ? item.model : "火山 BigModel ASR")}</span><span class="provider-actions"><button type="button" data-provider-action="edit" data-provider-id="${escapeHtml(item.id)}">编辑</button><button type="button" data-provider-action="toggle" data-provider-id="${escapeHtml(item.id)}" data-enabled="${item.enabled ? "false" : "true"}">${item.enabled ? "禁用" : "启用"}</button><button class="danger" type="button" data-provider-action="delete" data-provider-id="${escapeHtml(item.id)}">删除</button></span></div>`).join("")}</div>`;
+  el.providerList.innerHTML = `<div class="provider-table"><div class="provider-row provider-head"><span>名称</span><span>状态</span><span>${modelLabel}</span><span>操作</span></div>${items.map((item) => `<div class="provider-row"><span><strong>${escapeHtml(item.name)}</strong><small>${kind === "llm" ? escapeHtml(providerProtocolLabel(item.protocol)) : `Resource ID: ${escapeHtml(item.resource_id || "volc.seedasr.auc")}`}</small></span><span><span class="provider-status ${item.enabled ? "enabled" : "disabled"}">${item.enabled ? "已启用" : "已禁用"}</span></span><span>${escapeHtml(kind === "llm" ? item.model : "火山 BigModel ASR")}</span><span class="provider-actions">${kind === "llm" ? `<button type="button" data-provider-action="test" data-provider-id="${escapeHtml(item.id)}" ${item.enabled ? "" : "disabled"}>测试连接</button>` : ""}<button type="button" data-provider-action="edit" data-provider-id="${escapeHtml(item.id)}">编辑</button><button type="button" data-provider-action="toggle" data-provider-id="${escapeHtml(item.id)}" data-enabled="${item.enabled ? "false" : "true"}">${item.enabled ? "禁用" : "启用"}</button><button class="danger" type="button" data-provider-action="delete" data-provider-id="${escapeHtml(item.id)}">删除</button></span></div>`).join("")}</div>`;
   el.providerList.querySelectorAll("[data-provider-action]").forEach((button) => button.addEventListener("click", async () => {
     const item = items.find((candidate) => candidate.id === button.dataset.providerId);
     if (!item) return;
     const action = button.dataset.providerAction;
     if (action === "edit") {
       showProviderForm(item);
+      return;
+    }
+    if (action === "test") {
+      button.disabled = true;
+      const originalLabel = button.textContent;
+      button.textContent = "测试中...";
+      try {
+        const result = await api("/api/providers/llm-test", { method: "POST", body: JSON.stringify({ provider_id: item.id }) });
+        toast(`${result.provider_name} 连接正常，耗时 ${result.elapsed_ms} ms。`);
+      } catch (error) {
+        toast(`连接测试失败：${error.message}`);
+      } finally {
+        button.disabled = false;
+        button.textContent = originalLabel;
+      }
       return;
     }
     if (action === "delete" && !confirm(`删除“${item.name}”配置？`)) return;
@@ -1884,11 +2414,14 @@ function showProviderForm(item = null) {
   apiKeyInput.required = !item;
   el.providerName.required = isLlm;
   el.volcProviderName.required = !isLlm;
+  if (el.providerModel) el.providerModel.required = isLlm;
   el.llmProviderFields.hidden = !isLlm;
   el.volcProviderFields.hidden = isLlm;
   el.providerBaseUrl.value = item?.base_url || "";
   el.providerProtocol.value = item?.protocol || "openai";
-  el.providerModel.value = item?.model || "";
+  renderProviderModelOptions(state.providerModels, item?.model || "");
+  syncProviderModelControl();
+  if (el.providerModelsStatus) el.providerModelsStatus.textContent = item ? "可点击“获取模型列表”校验当前接口。" : "先填写 API Key 和接口 URL，再获取模型列表。";
   el.providerResourceId.value = item?.resource_id || "volc.seedasr.auc";
   el.providerTosAccessKey.value = "";
   el.providerTosAccessKey.placeholder = item?.has_tos_access_key ? "已保存（留空不修改）" : "Access Key ID";
@@ -1897,7 +2430,7 @@ function showProviderForm(item = null) {
   el.providerTosBucket.value = item?.tos_bucket || "";
   el.providerTosEndpoint.value = item?.tos_endpoint || "";
   el.providerTosRegion.value = item?.tos_region || "";
-  if (el.providerAudioUrl) el.providerAudioUrl.value = "";
+  if (el.providerAudioUrl) el.providerAudioUrl.value = item?.audio_url || "";
   el.providerPollInterval.value = item?.poll_interval || 5;
   el.providerTosPrefix.value = item?.tos_prefix || "mp4-golden-asr";
   el.providerTosUrlExpires.value = item?.tos_url_expires || 86400;
@@ -1930,6 +2463,8 @@ el.providerEntries?.forEach((button) => button.addEventListener("click", () => {
 }));
 el.addProviderButton?.addEventListener("click", () => showProviderForm());
 el.cancelProviderButton?.addEventListener("click", hideProviderForm);
+el.providerModel?.addEventListener("change", syncProviderModelControl);
+el.fetchProviderModelsButton?.addEventListener("click", fetchProviderModels);
 el.backToProvidersButton?.addEventListener("click", () => { hideProviderForm(); switchView("providers"); });
 el.manageLlmButton?.addEventListener("click", () => { state.providerKind = "llm"; switchView("provider-list"); });
 el.manageVolcengineButton?.addEventListener("click", () => { state.providerKind = "volcengine"; switchView("provider-list"); });
@@ -1945,8 +2480,9 @@ el.providerForm?.addEventListener("submit", async (event) => {
     enabled: el.providerEnabled.checked,
     protocol: el.providerProtocol.value,
     base_url: el.providerBaseUrl.value.trim(),
-    model: el.providerModel.value.trim(),
+    model: currentProviderModel(),
     resource_id: el.providerResourceId.value.trim(),
+    audio_url: el.providerAudioUrl?.value.trim() || "",
     tos_access_key: el.providerTosAccessKey.value.trim(),
     tos_secret_key: el.providerTosSecretKey.value.trim(),
     tos_bucket: el.providerTosBucket.value.trim(),
@@ -2046,10 +2582,11 @@ async function loadJob(jobId) {
       startPolling();
     }
     if (job.analyze_task_id) {
-      const taskData = await api(`/api/clips/render-status?task_id=${encodeURIComponent(job.analyze_task_id)}`);
-      if (["queued", "running", "paused"].includes(taskData.task?.status)) {
+      const taskData = await api(`/api/tasks?job_id=${encodeURIComponent(jobId)}&limit=100`);
+      const analyzeTask = (taskData.clip_tasks || []).find((item) => item.task_id === job.analyze_task_id);
+      if (["queued", "running", "paused"].includes(analyzeTask?.status)) {
         state.analyzeTaskId = job.analyze_task_id;
-        setAnalyzeControls(taskData.task);
+        setAnalyzeControls(analyzeTask);
       }
     }
   } catch {}
@@ -2258,7 +2795,7 @@ async function pollAnalyzeTask(taskId) {
     if (task.status === "done") {
       state.highlights = task.highlights || { clips: [] };
       renderClips();
-      await refreshSettings();
+      await refreshProviders();
       const count = (state.highlights.clips || []).length;
       el.analyzeStatus.textContent = `\u5206\u6790\u5b8c\u6210\uff0c\u627e\u5230 ${count} \u4e2a\u5019\u9009\u7247\u6bb5`;
       toast(`\u5206\u6790\u5b8c\u6210\uff0c\u627e\u5230 ${count} \u4e2a\u5019\u9009\u7247\u6bb5\u3002`);
@@ -2713,19 +3250,32 @@ if (el.clearTranscriptViewButton) el.clearTranscriptViewButton.addEventListener(
 if (el.clearClipsButton) el.clearClipsButton.addEventListener("click", clearAllClips);
 if (el.resetAnalyzeButton) el.resetAnalyzeButton.addEventListener("click", resetAnalyzeControls);
 if (el.clearExportDirectoryButton) el.clearExportDirectoryButton.addEventListener("click", () => { el.exportDirectory.value = ""; toast("导出目录已清空，将保存到本视频的结果文件夹。"); });
+if (el.trendFetchPeopleButton) el.trendFetchPeopleButton.addEventListener("click", fetchTrendHotspots);
 if (el.trendSearchButton) el.trendSearchButton.addEventListener("click", runTrendSearch);
+if (el.trendPeopleList) el.trendPeopleList.addEventListener("change", (event) => {
+  const input = event.target.closest("input[data-trend-hotspot-id]");
+  if (!input || !el.trendPeopleList.contains(input)) return;
+  updateTrendHotspotSelection(input.dataset.trendHotspotId, input.checked);
+});
 if (el.trendDateRange) el.trendDateRange.addEventListener("change", () => {
   if (el.trendCustomDates) el.trendCustomDates.hidden = el.trendDateRange.value !== "custom";
 });
-if (el.trendKeywords) el.trendKeywords.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") {
-    event.preventDefault();
-    runTrendSearch();
-  }
+if (el.trendKnowledgeEntries) el.trendKnowledgeEntries.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-knowledge-edit], button[data-knowledge-delete]");
+  if (!button || !el.trendKnowledgeEntries.contains(button)) return;
+  event.preventDefault();
+  if (button.dataset.knowledgeEdit) editTrendKnowledge(button.dataset.knowledgeEdit);
+  else if (button.dataset.knowledgeDelete) deleteTrendKnowledge(button.dataset.knowledgeDelete);
 });
-if (el.trendKeywords) el.trendKeywords.addEventListener("input", () => {
-  if (!el.trendKeywords.value.trim()) clearTrendSearchResults();
-});
+if (el.saveTrendKnowledgeButton) el.saveTrendKnowledgeButton.addEventListener("click", saveTrendKnowledge);
+if (el.cancelTrendKnowledgeEditButton) el.cancelTrendKnowledgeEditButton.addEventListener("click", resetTrendKnowledgeEditor);
+if (el.refreshPublishAssetsButton) el.refreshPublishAssetsButton.addEventListener("click", () => refreshPublishAssets().catch((error) => { el.publishFormStatus.textContent = error.message; }));
+if (el.selectPublishLocalVideoButton) el.selectPublishLocalVideoButton.addEventListener("click", () => el.publishLocalFileInput?.click());
+if (el.publishLocalFileInput) el.publishLocalFileInput.addEventListener("change", () => importPublishLocalVideo(el.publishLocalFileInput.files?.[0]));
+if (el.refreshPublishTasksButton) el.refreshPublishTasksButton.addEventListener("click", () => refreshPublishTasks().catch((error) => { el.publishFormStatus.textContent = error.message; }));
+document.querySelectorAll("input[name='publishPlatform']").forEach((input) => input.addEventListener("change", syncPublishPlatformFields));
+syncPublishPlatformFields();
+if (el.publishForm) el.publishForm.addEventListener("submit", createPublishPlan);
 
 el.sourceVideo.addEventListener("error", async () => {
   if (!state.jobId) return;
@@ -2780,23 +3330,54 @@ function formatBytes(bytes) {
 function renderTaskRow(task) {
   const meta = state.jobMeta[task.job_id] || {};
   const isWorkspace = Boolean(task.virtual);
+  const isPublish = task.type === "publish";
+  const isTrendSearch = task.type === "trend_search";
   const percent = task.percent ?? Math.round((task.progress || 0) * 100);
   const elapsed = formatShortTime(task.elapsed || 0);
-  const canCancel = ["queued", "running"].includes(task.status);
-  const canRetry = ["error", "cancelled"].includes(task.status);
+  const taskTime = formatTaskTime(task.updated_at || task.created_at);
+  const canCancel = ["queued", "running"].includes(task.status) && !isPublish && !isTrendSearch;
+  const canRetry = ["error", "cancelled"].includes(task.status) && !isPublish && !isTrendSearch;
   const row = document.createElement("div");
   row.className = `task-item ${taskStatusClass(task.status)}`;
+  const openLabel = isPublish
+    ? "查看发布页"
+    : (isTrendSearch ? (task.search_id ? "查看搜索记录" : "查看爆款搜索") : (task.type === "draft" ? "继续填写" : "查看工作台"));
   row.innerHTML = `
-    <div class="task-item-top"><strong>${escapeHtml(task.title || meta.title || task.job_id || "未知视频")} · ${escapeHtml(taskTypeText(task.type))}</strong><span>${escapeHtml(taskStatusText(task.status))}${isWorkspace ? "" : ` · ${percent}%`}</span></div>
+    <div class="task-item-top"><strong>${escapeHtml(task.title || meta.title || task.platform_name || task.job_id || "未知视频")} · ${escapeHtml(taskTypeText(task.type))}</strong><span>${escapeHtml(taskStatusText(task.status))}${isWorkspace ? "" : ` · ${percent}%`}</span></div>
     ${isWorkspace ? "" : `<div class="progress-bar"><span style="width:${Math.max(0, Math.min(100, percent))}%"></span></div>`}
-    <div class="task-item-bottom"><span>${escapeHtml(task.message || "等待任务状态")}${isWorkspace ? "" : ` · 已用 ${elapsed}`}</span><span class="task-item-actions"><button data-action="open-task" type="button">${task.type === "draft" ? "继续填写" : "查看工作台"}</button>${canRetry ? `<button data-task-id="${encodeURIComponent(task.task_id || "")}" data-action="retry-task" type="button">重试</button>` : ""}${canCancel ? `<button data-task-id="${encodeURIComponent(task.task_id || "")}" data-action="cancel-task" type="button">取消</button>` : ""}</span></div>`;
+    <div class="task-item-bottom"><span>${escapeHtml(task.message || "等待任务状态")}${isWorkspace ? "" : ` · 已用 ${elapsed}`}<small class="task-item-time">更新时间：${escapeHtml(taskTime)}</small></span><span class="task-item-actions"><button data-action="open-task" type="button">${openLabel}</button>${canRetry ? `<button data-task-id="${encodeURIComponent(task.task_id || "")}" data-action="retry-task" type="button">重试</button>` : ""}${canCancel ? `<button data-task-id="${encodeURIComponent(task.task_id || "")}" data-action="cancel-task" type="button">取消</button>` : ""}<button data-action="delete-task" type="button">删除记录</button></span></div>`;
   row.querySelector("[data-action='open-task']")?.addEventListener("click", () => {
+    if (isPublish) {
+      switchView("publishing");
+      return;
+    }
+    if (isTrendSearch) {
+      openTrendSearchRecord(task.search_id);
+      return;
+    }
     ensureJobTab(task.job_id, { title: meta.title || task.job_id });
     switchView("workbench");
     loadJob(task.job_id);
   });
   row.querySelector("[data-action='retry-task']")?.addEventListener("click", async (event) => { await retryTask(decodeURIComponent(event.currentTarget.dataset.taskId)); });
   row.querySelector("[data-action='cancel-task']")?.addEventListener("click", async (event) => { await cancelRender(decodeURIComponent(event.currentTarget.dataset.taskId)); await refreshTasks(); });
+  row.querySelector("[data-action='delete-task']")?.addEventListener("click", async () => {
+    const taskId = task.task_id || "";
+    if (!taskId || !confirm(`删除“${task.title || taskTypeText(task.type)}”的任务记录？`)) return;
+    try {
+      if (task.virtual) {
+        state.dismissedTaskIds.add(taskId);
+        await refreshTasks();
+        toast("已隐藏任务记录。");
+      } else {
+        await api("/api/tasks/delete", { method: "POST", body: JSON.stringify({ task_id: taskId }) });
+        await Promise.all([refreshTasks(), refreshPublishTasks()]);
+        toast("已删除任务记录。");
+      }
+    } catch (error) {
+      toast(`删除任务记录失败：${error.message}`);
+    }
+  });
   return row;
 }
 
@@ -2807,16 +3388,29 @@ async function refreshTasks() {
   (data.jobs || []).forEach((job) => {
     if (job?.job_id) state.jobMeta[job.job_id] = { ...(state.jobMeta[job.job_id] || {}), title: job.title || job.job_id };
   });
-  const tasks = [...draftTaskEntries(), ...waitingWorkspaceEntries(data.jobs, backgroundTasks), ...backgroundTasks];
-  const active = tasks.filter((task) => ["draft", "waiting", "queued", "running", "paused"].includes(task.status));
+  const tasks = [...draftTaskEntries(), ...waitingWorkspaceEntries(data.jobs, backgroundTasks), ...backgroundTasks]
+    .filter((task) => !state.dismissedTaskIds.has(task.task_id));
+  const active = tasks.filter((task) => ["draft", "waiting", "planned", "queued", "running", "paused"].includes(task.status));
   syncCompletedTasks(backgroundTasks);
   if (el.activeTaskCount) { el.activeTaskCount.textContent = String(active.length); el.activeTaskCount.hidden = active.length === 0; }
-  const filtered = state.taskFilter === "completed" ? tasks.filter((task) => ["done", "error", "cancelled"].includes(task.status)) : active;
-  el.taskSummary.textContent = `${filtered.length} 个${state.taskFilter === "completed" ? "已完成" : "进行中"}任务 · 共 ${tasks.length} 个`;
+  const filtered = state.taskCategory === "all" ? tasks : tasks.filter((task) => (task.category || task.type) === state.taskCategory);
+  el.taskSummary.textContent = `${filtered.length} 个任务 · ${active.length} 个进行中 · 共 ${tasks.length} 个`;
   el.taskList.innerHTML = "";
   el.taskList.className = filtered.length ? "task-list" : "task-list task-list-empty";
-  if (!filtered.length) { el.taskList.textContent = state.taskFilter === "completed" ? "暂无已完成任务。" : "当前没有进行中的任务。"; return; }
-  filtered.forEach((task) => { el.taskList.appendChild(renderTaskRow(task)); });
+  if (!filtered.length) { el.taskList.textContent = state.taskCategory === "all" ? "暂无后台任务。" : `暂无${taskCategoryText(state.taskCategory)}。`; return; }
+  const groups = new Map();
+  filtered.forEach((task) => {
+    const category = task.category || task.type || "other";
+    if (!groups.has(category)) groups.set(category, []);
+    groups.get(category).push(task);
+  });
+  groups.forEach((items, category) => {
+    const heading = document.createElement("div");
+    heading.className = "task-category-heading";
+    heading.innerHTML = `<strong>${escapeHtml(taskCategoryText(category))}</strong><span>${items.length} 条</span>`;
+    el.taskList.appendChild(heading);
+    items.forEach((task) => el.taskList.appendChild(renderTaskRow(task)));
+  });
 }
 
 async function refreshLibrary() {
@@ -2864,8 +3458,13 @@ async function deleteLibraryItem(item) {
 }
 
 el.navItems?.forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
-el.taskFilterActive?.addEventListener("click", () => { state.taskFilter = "active"; el.taskFilterActive.classList.add("active"); el.taskFilterCompleted.classList.remove("active"); refreshTasks(); });
-el.taskFilterCompleted?.addEventListener("click", () => { state.taskFilter = "completed"; el.taskFilterCompleted.classList.add("active"); el.taskFilterActive.classList.remove("active"); refreshTasks(); });
+el.taskCategoryFilters?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-task-category]");
+  if (!button) return;
+  state.taskCategory = button.dataset.taskCategory || "all";
+  el.taskCategoryFilters.querySelectorAll("[data-task-category]").forEach((item) => item.classList.toggle("active", item === button));
+  refreshTasks();
+});
 
 async function boot() {
   const today = localDateInputValue(new Date());
@@ -2878,7 +3477,8 @@ async function boot() {
   startSafetyPolling();
   await refreshTasks();
   state.taskTimer = setInterval(() => refreshTasks().catch(() => {}), 2500);
-  await refreshSettings();
+  await refreshProviders();
+  await loadTrendKnowledge().catch(() => {});
   syncTranscribeEngineUI();
   await refreshStorage();
   const items = await refreshLibrary();

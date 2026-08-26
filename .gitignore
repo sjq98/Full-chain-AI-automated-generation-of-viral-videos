@@ -47,3 +47,15 @@ Thumbs.db
 desktop/resources/backend/
 desktop/resources/icon.ico
 .hermes/
+.tools/bun/
+runtime-server*.log
+vendor/publishers/**/cookies/
+vendor/publishers/**/browser_data/
+vendor/publishers/**/logs/
+vendor/publishers/**/.upstream-git/
+.playwright-cli/
+output/
+*-server.err.log
+*-server.out.log
+trend-test-page.png
+make_douyin_*.py
