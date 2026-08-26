@@ -59,7 +59,6 @@ export class ContentService {
           return '';
         },
         noteId,
-        false,
       );
 
       if (!result) {
@@ -225,7 +224,6 @@ export class ContentService {
           });
         },
         userId,
-        false,
       );
 
       if (!result) {
@@ -270,7 +268,6 @@ export class ContentService {
           return '';
         },
         null,
-        false,
       );
 
       if (!result) {

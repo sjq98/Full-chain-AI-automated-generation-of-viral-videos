@@ -144,7 +144,6 @@ export class BrowserContextManager {
           };
         },
         null,
-        false,
       );
 
       if (result) {
@@ -285,7 +284,6 @@ export class BrowserContextManager {
           };
         },
         userId,
-        false,
       );
 
       if (result) {

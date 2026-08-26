@@ -480,7 +480,6 @@ export class ExploreService {
           return '[]';
         },
         null,
-        false,
       );
       return JSON.parse(feedsJson);
     } catch (error) {
@@ -578,7 +577,6 @@ export class ExploreService {
           return null;
         },
         noteId,
-        false,
       );
 
       return detailJson ? JSON.parse(detailJson) : null;

@@ -188,7 +188,6 @@ export class NotificationService {
           );
         },
         null,
-        false,
       );
 
       if (!notificationData) {

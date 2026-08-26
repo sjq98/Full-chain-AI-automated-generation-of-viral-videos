@@ -242,7 +242,6 @@ export class LoginSessionManager {
         return null;
       },
       null,
-      false,
     );
 
     let qrCodeContent = '';
@@ -418,7 +417,6 @@ export class LoginSessionManager {
           };
         },
         null,
-        false,
       );
 
       return result;
@@ -528,7 +526,6 @@ export class LoginSessionManager {
           };
         },
         userId,
-        false,
       );
 
       if (result) {

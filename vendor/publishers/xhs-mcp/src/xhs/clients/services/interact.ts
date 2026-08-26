@@ -60,7 +60,6 @@ export class InteractService {
           return false;
         },
         null,
-        false,
       );
 
       // 根据当前状态和目标操作决定是否需要点击
@@ -140,7 +139,6 @@ export class InteractService {
           return false;
         },
         null,
-        false,
       );
 
       const shouldClick = (unfavorite && isCollected) || (!unfavorite && !isCollected);

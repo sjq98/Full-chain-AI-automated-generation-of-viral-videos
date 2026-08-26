@@ -84,7 +84,6 @@ export class SearchService {
             return '';
           },
           null,
-          false,
         );
         return result ? JSON.parse(result) : [];
       };
