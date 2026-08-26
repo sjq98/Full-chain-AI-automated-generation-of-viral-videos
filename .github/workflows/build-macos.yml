@@ -11,7 +11,16 @@ permissions:
 
 jobs:
   build-macos:
-    runs-on: macos-13
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: x64
+          - runner: macos-15
+            arch: arm64
     timeout-minutes: 90
     steps:
       - name: Checkout
@@ -61,6 +70,6 @@ jobs:
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
-          name: mp4-golden-clip-workbench-macos
+          name: mp4-golden-clip-workbench-macos-${{ matrix.arch }}
           path: desktop/dist/*.dmg
           if-no-files-found: error
