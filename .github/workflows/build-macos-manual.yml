@@ -1,0 +1,76 @@
+name: Build macOS DMG On Demand
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-macos-manual
+  cancel-in-progress: true
+
+jobs:
+  build-macos:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: x64
+          - runner: macos-15
+            arch: arm64
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            desktop/package-lock.json
+            vendor/publishers/xhs-mcp/package-lock.json
+
+      - name: Install FFmpeg
+        run: |
+          brew install ffmpeg
+          mkdir -p bin
+          cp "$(command -v ffmpeg)" bin/ffmpeg
+
+      - name: Install Python build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r vendor/MediaCrawler/requirements.txt pyinstaller tos yt-dlp
+
+      - name: Build the Xiaohongshu publisher runtime
+        working-directory: vendor/publishers/xhs-mcp
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci --no-audit --no-fund
+
+      - name: Build DMG
+        working-directory: desktop
+        env:
+          PYTHON: python3
+        run: npm run dist:mac
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: mp4-golden-clip-workbench-macos-manual-${{ matrix.arch }}
+          path: desktop/dist/*.dmg
+          if-no-files-found: error
