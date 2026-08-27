@@ -2320,11 +2320,21 @@ function renderProviderModelOptions(models = [], selected = "") {
   syncProviderModelControl();
 }
 
-async function fetchProviderModels() {
-  if (!el.fetchProviderModelsButton) return;
+function setProviderModelFetchButtonState({ available, loading = false }) {
   const button = el.fetchProviderModelsButton;
+  if (!button) return;
+  const disabled = !available || loading;
+  button.disabled = disabled;
+  if (disabled) button.setAttribute("disabled", "");
+  else button.removeAttribute("disabled");
+  button.setAttribute("aria-busy", String(Boolean(loading)));
+  button.setAttribute("aria-disabled", String(disabled));
+}
+
+async function fetchProviderModels() {
+  if (!el.fetchProviderModelsButton || el.providerKind?.value !== "llm") return;
   const selected = currentProviderModel();
-  button.disabled = true;
+  setProviderModelFetchButtonState({ available: true, loading: true });
   if (el.providerModelsStatus) el.providerModelsStatus.textContent = "正在读取模型列表...";
   try {
     const data = await api("/api/providers/models", {
@@ -2344,7 +2354,7 @@ async function fetchProviderModels() {
     if (el.providerModelsStatus) el.providerModelsStatus.textContent = error.message;
     toast(`获取模型列表失败：${error.message}`);
   } finally {
-    button.disabled = false;
+    setProviderModelFetchButtonState({ available: true });
   }
 }
 
@@ -2421,6 +2431,7 @@ function showProviderForm(item = null) {
   el.providerProtocol.value = item?.protocol || "openai";
   renderProviderModelOptions(state.providerModels, item?.model || "");
   syncProviderModelControl();
+  setProviderModelFetchButtonState({ available: isLlm });
   if (el.providerModelsStatus) el.providerModelsStatus.textContent = item ? "可点击“获取模型列表”校验当前接口。" : "先填写 API Key 和接口 URL，再获取模型列表。";
   el.providerResourceId.value = item?.resource_id || "volc.seedasr.auc";
   el.providerTosAccessKey.value = "";
