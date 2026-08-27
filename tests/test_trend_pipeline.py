@@ -237,7 +237,7 @@ class TrendPipelineTests(unittest.TestCase):
         self.assertFalse(result["topics"][0]["materials"])
         self.assertTrue(all(topic["materials"] for topic in result["topics"][1:]))
 
-    def test_hotspot_date_does_not_filter_historical_source_footage(self):
+    def test_hotspot_date_filters_historical_source_footage(self):
         source = {"title": "36Kr 热点", "url": "https://36kr.com/p/1", "description": "人物公开发言", "published_at": "2026-08-24", "heat_score": 80}
         topic = {
             "topic_id": "topic-1", "title": "热点选题", "speaker_name": "人物甲", "speaker_role": "创始人",
@@ -248,8 +248,8 @@ class TrendPipelineTests(unittest.TestCase):
         }
         received_ranges = []
 
-        def fake_crawler(keywords, platform, _limit, start_at, end_at):
-            received_ranges.append((start_at, end_at))
+        def fake_crawler(keywords, platform, _limit, start_at, end_at, min_published_at):
+            received_ranges.append((start_at, end_at, min_published_at))
             return keywords, [{
                 "candidate_id": "history-video", "title": "人物甲 完整访谈", "description": "公开对话",
                 "url": "https://video.test/history", "platform": platform, "author": "媒体",
@@ -270,9 +270,40 @@ class TrendPipelineTests(unittest.TestCase):
             ):
                 result = app.discover_ai_trends({"person_pool_id": "people-test", "person_ids": ["person-001"], "platforms": ["bili"], "start_at": "2026-08-24", "end_at": "2026-08-24"})
 
-        self.assertEqual(received_ranges, [("", "")])
+        self.assertEqual(received_ranges, [("", "", "2026-08-24"), ("", "", "2026-08-24")])
         self.assertEqual(len(result["topics"]), 1)
-        self.assertEqual(result["topics"][0]["materials"][0]["published_at"], "2025-08-24")
+        self.assertFalse(result["topics"][0]["materials"])
+        self.assertTrue(any("早于热点报道发布时间" in warning for warning in result["warnings"]))
+
+    def test_hotspot_timestamp_filters_earlier_same_day_video(self):
+        # Hotspot filtering intentionally ignores the time of day.
+        self.assertFalse(app.is_published_before("2026-08-24 08:59:59", "2026-08-24 09:00:00"))
+        self.assertFalse(app.is_published_before("2026-08-24 09:00:00", "2026-08-24 09:00:00"))
+        self.assertFalse(app.is_published_before("2026-08-24 09:00:01", "2026-08-24 09:00:00"))
+        self.assertTrue(app.is_published_before("2026-08-23 23:59:59", "2026-08-24 00:00:00"))
+
+    def test_trend_platforms_add_douyin_as_bilibili_fallback(self):
+        self.assertEqual(app.normalize_trend_platforms(["bili"]), ["bili", "dy"])
+        self.assertEqual(app.normalize_trend_platforms(["dy"]), ["dy"])
+        self.assertEqual(app.normalize_trend_platforms([]), ["bili", "dy"])
+
+    def test_unix_video_timestamp_is_compared_by_local_date(self):
+        self.assertEqual(app.parse_result_date("1761296205").isoformat(), "2025-10-24")
+        self.assertTrue(app.is_published_before("1761296205", "2026-08-20 15:38:36"))
+
+    def test_final_material_pass_removes_stale_historical_candidates(self):
+        topics = [{
+            "topic_id": "topic-1",
+            "title": "热点",
+            "published_at": "2026-08-20 15:38:36",
+            "materials": [
+                {"url": "https://video.test/old", "published_at": "1761296205", "material_score": 99},
+                {"url": "https://video.test/current", "published_at": "2026-08-20 08:00:00", "material_score": 80},
+            ],
+        }]
+        discarded = app.enforce_topic_material_date_cutoff(topics, material_limit=3)
+        self.assertEqual(discarded, 1)
+        self.assertEqual([item["url"] for item in topics[0]["materials"]], ["https://video.test/current"])
 
     def test_material_lookup_runs_per_person_and_stops_after_target(self):
         topics = [
@@ -296,6 +327,41 @@ class TrendPipelineTests(unittest.TestCase):
         self.assertEqual(seen_keywords, [["人物甲 访谈"]])
         self.assertTrue(topics[0]["materials"])
         self.assertFalse(topics[1]["materials"])
+
+    def test_material_lookup_falls_back_to_douyin_when_bilibili_is_short(self):
+        topics = [{
+            "topic_id": "topic-1",
+            "title": "热点",
+            "subject_label": "目标主体",
+            "match_terms": ["目标主体"],
+            "published_at": "2026-08-20",
+            "materials": [],
+            "material_queries": ["目标主体 事件", "目标主体 发布会"],
+        }]
+        calls = []
+
+        def fake_crawler(keywords, platform, _limit, *_args):
+            calls.append(platform)
+            count = 1 if platform == "bili" else 2
+            candidates = [{
+                "candidate_id": f"{platform}-{index}",
+                "title": f"目标主体 {platform} 视频 {index}",
+                "description": "事件现场",
+                "url": f"https://video.test/{platform}/{index}",
+                "platform": platform,
+                "author": "媒体",
+                "published_at": "2026-08-21",
+                "keyword": keywords[0],
+                "heat_score": 70,
+            } for index in range(count)]
+            return keywords, candidates, []
+
+        with patch.object(app, "search_media_crawler_candidates", side_effect=fake_crawler):
+            app.collect_trend_materials(topics, ["bili", "dy"], material_limit=3)
+
+        self.assertEqual(calls, ["bili", "dy"])
+        self.assertEqual(len(topics[0]["materials"]), 3)
+        self.assertEqual({item["platform"] for item in topics[0]["materials"]}, {"bili", "dy"})
 
     def test_36kr_hotlist_is_used_as_the_only_hotspot_source(self):
         first_day = [{"rank": 1, "title": "雷军谈智能汽车", "content": "小米创始人公开分享业务判断", "url": "https://36kr.com/p/100", "publishTime": "2026-08-23 09:00:00", "author": "36Kr"}]

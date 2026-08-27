@@ -173,6 +173,7 @@ def build_release() -> None:
                 "tools",
             ],
             cwd=MEDIA_CRAWLER_DIR,
+            console=False,
         )
         downloader = build_onefile(
             runner,
@@ -214,6 +215,8 @@ def build_release() -> None:
             [
                 "--add-data",
                 data_arg(ROOT / "static", "static"),
+                "--add-data",
+                data_arg(MEDIA_CRAWLER_DIR / "libs", "mediacrawler-libs"),
                 "--add-data",
                 data_arg(publishers, "vendor/publishers"),
                 "--add-data",

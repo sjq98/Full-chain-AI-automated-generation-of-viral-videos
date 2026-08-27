@@ -61,6 +61,9 @@ TREND_KNOWLEDGE_PATH = TRENDS_DIR / "taste-knowledge.json"
 MEDIA_CRAWLER_DIR = ROOT / "vendor" / "MediaCrawler"
 MEDIA_CRAWLER_VENV_DIR = MEDIA_CRAWLER_DIR / ".venv"
 MEDIA_CRAWLER_RUNTIME_DIR = RUNTIME_DIR / "mediacrawler"
+MEDIA_CRAWLER_BUNDLED_LIBS_DIR = (
+    RES_ROOT / "mediacrawler-libs" if IS_FROZEN else MEDIA_CRAWLER_DIR / "libs"
+)
 PUBLISHERS_DIR = RES_ROOT / "vendor" / "publishers" if IS_FROZEN else ROOT / "vendor" / "publishers"
 PUBLISHER_RUNTIME_DIR = RUNTIME_DIR / "publishers"
 PUBLISH_CHROME_PROFILE_DIR = PUBLISHER_RUNTIME_DIR / "chrome"
@@ -172,6 +175,40 @@ def ensure_dirs():
     initialize_frozen_profile()
     for path in (STATIC_DIR, JOBS_DIR, OUTPUTS_DIR, RUNTIME_DIR, TRENDS_DIR, PUBLISHER_RUNTIME_DIR, PUBLISH_CHROME_PROFILE_DIR, PUBLISH_LOCAL_ASSETS_DIR):
         path.mkdir(parents=True, exist_ok=True)
+    ensure_media_crawler_resources()
+
+
+def ensure_media_crawler_resources():
+    """Deploy MediaCrawler's runtime JavaScript assets beside its working directory.
+
+    MediaCrawler imports several platform modules at process startup. Those modules
+    read files such as ``libs/douyin.js`` using paths relative to the process cwd,
+    so PyInstaller's ``_MEIPASS`` resource directory is not visible to them. The
+    packaged backend therefore copies the read-only bundled assets into the
+    writable runtime directory used as MediaCrawler's cwd.
+    """
+    if not IS_FROZEN:
+        return
+    source_dir = MEDIA_CRAWLER_BUNDLED_LIBS_DIR
+    if not source_dir.is_dir():
+        raise RuntimeError(
+            "打包资源缺少 MediaCrawler 脚本目录，请重新构建桌面后端"
+        )
+    target_dir = MEDIA_CRAWLER_RUNTIME_DIR / "libs"
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for source in source_dir.iterdir():
+            if not source.is_file():
+                continue
+            target = target_dir / source.name
+            if (
+                not target.exists()
+                or target.stat().st_size != source.stat().st_size
+                or target.stat().st_mtime_ns < source.stat().st_mtime_ns
+            ):
+                shutil.copy2(source, target)
+    except OSError as exc:
+        raise RuntimeError(f"MediaCrawler 脚本资源部署失败：{exc}") from exc
 
 
 def initialize_frozen_profile():
@@ -1506,26 +1543,52 @@ def video_platform(url):
     return host or "网页视频"
 
 
-def parse_result_date(value):
+def parse_result_datetime(value):
     text = str(value or "").strip()
     if not text:
         return None
     if re.fullmatch(r"\d{10}(?:\.\d+)?", text):
         try:
-            return datetime.fromtimestamp(float(text)).date()
+            return datetime.fromtimestamp(float(text))
         except (OSError, OverflowError, ValueError):
             return None
     if re.fullmatch(r"\d{13}", text):
         try:
-            return datetime.fromtimestamp(int(text) / 1000).date()
+            return datetime.fromtimestamp(int(text) / 1000)
         except (OSError, OverflowError, ValueError):
             return None
-    for fmt in ("%a, %d %b %Y %H:%M:%S %Z", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d"):
+    normalized = text.replace("Z", "+00:00")
+    for fmt in (
+        "%a, %d %b %Y %H:%M:%S %Z",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+    ):
         try:
-            return datetime.strptime(text, fmt).date()
+            parsed = datetime.strptime(normalized, fmt)
+            if parsed.tzinfo:
+                parsed = parsed.astimezone().replace(tzinfo=None)
+            return parsed
         except ValueError:
             continue
     return None
+
+
+def parse_result_date(value):
+    parsed = parse_result_datetime(value)
+    return parsed.date() if parsed else None
+
+
+def is_published_before(value, cutoff):
+    """Compare publication dates only; time-of-day and timezone are ignored."""
+    published = parse_result_date(value)
+    threshold = parse_result_date(cutoff)
+    return bool(published and threshold and published < threshold)
 
 
 def in_selected_date_range(published_at, start_at, end_at):
@@ -1691,6 +1754,20 @@ def media_crawler_platform_label(platform):
     }.get(platform, platform)
 
 
+def normalize_trend_platforms(value):
+    """Keep the user's order while ensuring Douyin is the fallback for Bilibili."""
+    selected = []
+    for item in value or ("bili", "dy"):
+        platform = str(item or "").strip()
+        if platform in {"bili", "dy"} and platform not in selected:
+            selected.append(platform)
+    if not selected:
+        selected = ["bili", "dy"]
+    if "bili" in selected and "dy" not in selected:
+        selected.append("dy")
+    return selected
+
+
 def to_metric_number(value):
     if value is None:
         return 0.0
@@ -1760,7 +1837,14 @@ def read_jsonl_items(root):
     return items
 
 
-def search_media_crawler_candidates(keywords, platform, limit, start_at="", end_at=""):
+def search_media_crawler_candidates(
+    keywords,
+    platform,
+    limit,
+    start_at="",
+    end_at="",
+    min_published_at="",
+):
     runner, working_dir = media_crawler_runner()
 
     normalized = []
@@ -1802,6 +1886,7 @@ def search_media_crawler_candidates(keywords, platform, limit, start_at="", end_
             encoding="utf-8",
             errors="replace",
             timeout=MEDIA_CRAWLER_TIMEOUT,
+            **_hidden_console_subprocess_kwargs(),
         )
     except subprocess.TimeoutExpired as exc:
         detail = (exc.stderr or exc.stdout or "").strip()
@@ -1816,6 +1901,7 @@ def search_media_crawler_candidates(keywords, platform, limit, start_at="", end_
 
     raw_items = read_jsonl_items(output_dir)
     candidates = []
+    before_cutoff_count = 0
     seen = set()
     for item in raw_items:
         keyword = str(first_present(item, "source_keyword") or normalized[0])
@@ -1823,6 +1909,9 @@ def search_media_crawler_candidates(keywords, platform, limit, start_at="", end_
         if not candidate["url"] or candidate["url"] in seen:
             continue
         if not in_selected_date_range(candidate["published_at"], start_at, end_at):
+            continue
+        if is_published_before(candidate["published_at"], min_published_at):
+            before_cutoff_count += 1
             continue
         seen.add(candidate["url"])
         candidate["candidate_id"] = f"candidate-{len(candidates) + 1:03d}-{uuid4().hex[:6]}"
@@ -1832,6 +1921,10 @@ def search_media_crawler_candidates(keywords, platform, limit, start_at="", end_
             break
     candidates.sort(key=lambda item: item["heat_score"], reverse=True)
     warnings = []
+    if before_cutoff_count:
+        warnings.append(
+            f"已排除 {before_cutoff_count} 条早于热点报道发布时间的视频素材。"
+        )
     if not candidates:
         if raw_items:
             warnings.append(
@@ -3031,6 +3124,30 @@ def dedupe_topic_materials(topics, material_limit):
         topic["materials"] = deduped
 
 
+def enforce_topic_material_date_cutoff(topics, material_limit=None):
+    """Remove any material published before its hotspot's calendar date.
+
+    MediaCrawler results are filtered at ingestion time, but this final pass also
+    protects the persisted response when an adapter supplies a non-standard date
+    field or a topic already contains candidates from an older pipeline run.
+    """
+    discarded = 0
+    for topic in topics:
+        cutoff = str(topic.get("published_at") or "").strip()
+        if not cutoff:
+            continue
+        kept = []
+        for material in topic.get("materials") or []:
+            if is_published_before(material.get("published_at"), cutoff):
+                discarded += 1
+                continue
+            kept.append(material)
+        topic["materials"] = kept
+    if material_limit is not None:
+        dedupe_topic_materials(topics, material_limit)
+    return discarded
+
+
 def collect_trend_materials(
     topics,
     platforms,
@@ -3043,12 +3160,13 @@ def collect_trend_materials(
     progress_end=0.90,
 ):
     warnings = []
+    cutoff_warnings = set()
     max_attempts = max((len(topic.get("material_queries") or []) for topic in topics), default=0)
     total_operations = max(1, max_attempts * max(1, len(topics)) * max(1, len(platforms)))
     completed_operations = 0
     for query_index in range(max_attempts):
         for topic in topics:
-            if topic.get("materials"):
+            if len(topic.get("materials") or []) >= material_limit:
                 continue
             if target_count and len(topics_with_materials(topics)) >= target_count:
                 return warnings
@@ -3071,17 +3189,41 @@ def collect_trend_materials(
                     )
                 try:
                     _, candidates, platform_warnings = search_media_crawler_candidates(
-                        [query], platform, max(12, material_limit * 4), start_at, end_at
+                        [query],
+                        platform,
+                        max(24, material_limit * 8),
+                        start_at,
+                        end_at,
+                        str(topic.get("published_at") or "").strip(),
                     )
                     warnings.extend(platform_warnings)
                 except RuntimeError as exc:
                     warnings.append(f"{media_crawler_platform_label(platform)} 素材检索失败：{exc}")
                     continue
+                cutoff = str(topic.get("published_at") or "").strip()
+                filtered_candidates = []
+                discarded_before_cutoff = 0
                 for candidate in candidates:
+                    if is_published_before(candidate.get("published_at"), cutoff):
+                        discarded_before_cutoff += 1
+                        continue
+                    filtered_candidates.append(candidate)
+                if discarded_before_cutoff and cutoff not in cutoff_warnings:
+                    cutoff_warnings.add(cutoff)
+                    warnings.append(
+                        f"{topic.get('subject_label') or topic.get('speaker_name') or topic.get('title') or '该热点'}："
+                        f"已排除 {discarded_before_cutoff} 条早于热点报道发布时间的视频素材。"
+                    )
+                for candidate in filtered_candidates:
                     append_topic_material(topic, candidate)
                 dedupe_topic_materials([topic], material_limit)
-                if topic.get("materials"):
+                if target_count and len(topics_with_materials(topics)) >= target_count:
+                    return warnings
+                if len(topic.get("materials") or []) >= material_limit:
                     break
+    final_discarded = enforce_topic_material_date_cutoff(topics, material_limit)
+    if final_discarded:
+        warnings.append(f"最终校验已移除 {final_discarded} 条早于热点报道日期的视频素材。")
     return warnings
 
 
@@ -3100,9 +3242,7 @@ def discover_selected_trend_hotspots(payload, progress_callback=None):
     knowledge_context = trend_knowledge_context()
     start_at = str(payload.get("start_at") or "").strip()
     end_at = str(payload.get("end_at") or "").strip()
-    platforms = [item for item in (payload.get("platforms") or ["bili", "dy"]) if item in {"bili", "dy"}]
-    if not platforms:
-        platforms = ["bili", "dy"]
+    platforms = normalize_trend_platforms(payload.get("platforms"))
     pool, selected_hotspots = load_selected_trend_hotspots(
         payload.get("hotspot_pool_id"), payload.get("hotspot_ids")
     )
@@ -3152,6 +3292,8 @@ def discover_selected_trend_hotspots(payload, progress_callback=None):
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "start_at": start_at,
         "end_at": end_at,
+        "material_platforms": platforms,
+        "material_date_policy": "按自然日排除早于热点报道日期的视频",
         "knowledge_count": len(knowledge_context),
         "hotspot_pool_id": pool.get("pool_id"),
         "selected_hotspots": [
@@ -3183,9 +3325,7 @@ def discover_ai_trends(payload, progress_callback=None):
     knowledge_context = trend_knowledge_context()
     start_at = str(payload.get("start_at") or "").strip()
     end_at = str(payload.get("end_at") or "").strip()
-    platforms = [item for item in (payload.get("platforms") or ["bili", "dy"]) if item in {"bili", "dy"}]
-    if not platforms:
-        platforms = ["bili", "dy"]
+    platforms = normalize_trend_platforms(payload.get("platforms"))
     pool, selected_people, sources = load_selected_trend_people(payload.get("person_pool_id"), payload.get("person_ids"))
     if not sources:
         raise RuntimeError("所选人物缺少可用的 36Kr 热点证据，请重新获取候选人物。")
@@ -3193,9 +3333,8 @@ def discover_ai_trends(payload, progress_callback=None):
     topics = choose_trend_topics(sources, knowledge_context, selected_people, provider_id=payload.get("provider_id"))
     if not topics:
         raise RuntimeError("AI 未能为所选人物生成选题，请稍后重试。")
-    # Hotness belongs to the 36Kr article date. Source footage can be an earlier
-    # interview, speech, or launch video for the same verified person, so do not
-    # discard it merely because it predates the news window.
+    # The source report timestamp is the lower bound for footage. This prevents
+    # a current hotspot from being matched to an unrelated years-old upload.
     report(0.42, "正在根据所选人物搜索视频素材")
     warnings = list(pool.get("warnings") or [])
     warnings.extend(collect_trend_materials(
@@ -3227,6 +3366,8 @@ def discover_ai_trends(payload, progress_callback=None):
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "start_at": start_at,
         "end_at": end_at,
+        "material_platforms": platforms,
+        "material_date_policy": "按自然日排除早于热点报道日期的视频",
         "knowledge_count": len(knowledge_context),
         "person_pool_id": pool.get("pool_id"),
         "selected_people": [{"person_id": person.get("person_id"), "name": person.get("name")} for person in selected_people],
