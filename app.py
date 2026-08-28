@@ -7,6 +7,7 @@ import mimetypes
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import threading
@@ -21,6 +22,11 @@ from pathlib import Path
 from uuid import uuid4
 from xml.etree import ElementTree
 from html.parser import HTMLParser
+
+try:
+    import certifi
+except ImportError:  # pragma: no cover - the release build installs certifi explicitly
+    certifi = None
 
 
 # Network routing is intentionally direct-only. The app never reads or changes
@@ -94,6 +100,10 @@ TREND_DISCOVERY_LOCK = threading.Lock()
 ACTIVE_TREND_DISCOVERY_TASK_ID = None
 TREND_HOTSPOT_LOCK = threading.Lock()
 ACTIVE_TREND_HOTSPOT_TASK_ID = None
+BROLL_TASK_LOCK = threading.Lock()
+BROLL_TASKS = {}
+BROLL_SEARCH_LOCK = threading.Lock()
+ACTIVE_BROLL_SEARCH_TASK_ID = None
 PUBLISH_TASK_LOCK = threading.Lock()
 PUBLISH_TASKS = {}
 PUBLISH_LOGIN_LOCK = threading.Lock()
@@ -244,6 +254,7 @@ def json_response(handler, payload, status=200):
 
 
 _NO_PROXY_OPENER = None
+_HTTPS_SSL_CONTEXT = None
 class ExternalNetworkError(RuntimeError):
     """External network failure with a message suitable for any provider."""
 
@@ -272,11 +283,27 @@ def strip_proxy_environment(environment):
     return environment
 
 
+def https_ssl_context():
+    """Return a verified context with both system and certifi trust roots."""
+    global _HTTPS_SSL_CONTEXT
+    if _HTTPS_SSL_CONTEXT is None:
+        context = ssl.create_default_context()
+        if certifi is not None:
+            # PyInstaller does not always discover certifi's PEM data through
+            # import analysis alone, so the build explicitly bundles it below.
+            context.load_verify_locations(cafile=certifi.where())
+        _HTTPS_SSL_CONTEXT = context
+    return _HTTPS_SSL_CONTEXT
+
+
 def http_opener():
     """Return the direct-only opener used for local and fallback requests."""
     global _NO_PROXY_OPENER
     if _NO_PROXY_OPENER is None:
-        _NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        _NO_PROXY_OPENER = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPSHandler(context=https_ssl_context()),
+        )
     return _NO_PROXY_OPENER
 
 
@@ -1514,6 +1541,26 @@ def set_trend_task(task_id, **changes):
 def get_trend_task(task_id):
     with TREND_TASK_LOCK:
         return dict(TREND_TASKS.get(task_id, {}))
+
+
+def set_broll_task(task_id, **changes):
+    with BROLL_TASK_LOCK:
+        task = BROLL_TASKS.setdefault(task_id, {"task_id": task_id, "created_at": datetime.now().isoformat(timespec="seconds")})
+        task.update(changes)
+        if "progress" in changes:
+            try:
+                progress = max(0.0, min(1.0, float(task.get("progress") or 0)))
+            except (TypeError, ValueError):
+                progress = 0.0
+            task["progress"] = progress
+            task["percent"] = int(round(progress * 100))
+        task["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        return dict(task)
+
+
+def get_broll_task(task_id):
+    with BROLL_TASK_LOCK:
+        return dict(BROLL_TASKS.get(task_id, {}))
 
 
 def strip_html(text):
@@ -4719,6 +4766,21 @@ def provider_id():
     return uuid4().hex
 
 
+PROVIDER_COLLECTIONS = {
+    "llm": "llm_providers",
+    "volcengine": "volcengine_providers",
+    "pexels": "pexels_providers",
+    "pixabay": "pixabay_providers",
+}
+
+
+def provider_collection_key(kind):
+    try:
+        return PROVIDER_COLLECTIONS[str(kind or "").strip().lower()]
+    except KeyError as exc:
+        raise RuntimeError("未知供应商类型") from exc
+
+
 def mask_secret(value):
     value = str(value or "")
     if not value:
@@ -4751,6 +4813,8 @@ def provider_settings():
             changed = True
     llms = saved.get("llm_providers")
     volcengines = saved.get("volcengine_providers")
+    pexels = saved.get("pexels_providers")
+    pixabay = saved.get("pixabay_providers")
     if not isinstance(llms, list):
         llms = []
         saved["llm_providers"] = llms
@@ -4766,6 +4830,10 @@ def provider_settings():
         volcengines = []
         saved["volcengine_providers"] = volcengines
         changed = True
+    for key in ("pexels_providers", "pixabay_providers"):
+        if not isinstance(saved.get(key), list):
+            saved[key] = []
+            changed = True
     if changed:
         write_json(SETTINGS_PATH, saved)
     return saved
@@ -4773,7 +4841,7 @@ def provider_settings():
 
 def enabled_provider(kind, preferred_id=None):
     saved = provider_settings()
-    key = "llm_providers" if kind == "llm" else "volcengine_providers"
+    key = provider_collection_key(kind)
     providers = saved.get(key, [])
     if preferred_id:
         provider = next((item for item in providers if item.get("id") == preferred_id), None)
@@ -4792,6 +4860,9 @@ def public_provider(provider, kind):
         item.pop("tos_secret_key", None)
         item["has_tos_access_key"] = bool(provider.get("tos_access_key"))
         item["has_tos_secret"] = bool(provider.get("tos_secret_key"))
+    if kind in {"pexels", "pixabay"}:
+        item["platform"] = kind
+        item["result_limit"] = int(provider.get("result_limit") or 12)
     return item
 
 
@@ -5020,6 +5091,323 @@ def test_llm_provider(provider_id=None):
         "model": provider.get("model") or "",
         "elapsed_ms": round((time.monotonic() - started) * 1000),
     }
+
+
+def test_material_provider(provider_id_value=None, kind=None):
+    """Verify a Pexels or Pixabay key with a minimal search request."""
+    kind = str(kind or "").strip().lower()
+    if kind not in {"pexels", "pixabay"}:
+        raise RuntimeError("素材平台连通性测试仅支持 Pexels 或 Pixabay。")
+    provider = enabled_provider(kind, provider_id_value)
+    if not provider or not provider.get("api_key"):
+        raise RuntimeError(f"请先在供应商管理中添加并启用 {kind} 配置。")
+    key = str(provider.get("api_key") or "").strip()
+    started = time.monotonic()
+    request = material_search_request(kind, "nature", {**provider, "result_limit": 1})
+    try:
+        with open_public_request(request, timeout=25) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:400]
+        raise RuntimeError(f"{provider.get('name') or kind} 测试失败：HTTP {exc.code} {detail}") from exc
+    except ExternalNetworkError as exc:
+        raise RuntimeError(f"{provider.get('name') or kind} 网络连接失败：{exc}") from exc
+    except (ValueError, urllib.error.URLError, OSError) as exc:
+        raise RuntimeError(f"{provider.get('name') or kind} 测试失败：{exc}") from exc
+    if not isinstance(result, dict):
+        raise RuntimeError(f"{provider.get('name') or kind} 返回了无法识别的数据。")
+    return {
+        "provider_id": provider.get("id") or "",
+        "provider_name": provider.get("name") or kind,
+        "platform": kind,
+        "result_count": len(result.get("videos") or result.get("hits") or []),
+        "elapsed_ms": round((time.monotonic() - started) * 1000),
+    }
+
+
+def material_search_url(kind, query, limit):
+    if kind == "pexels":
+        limit = max(1, min(30, int(limit or 12)))
+        return "https://api.pexels.com/videos/search?" + urllib.parse.urlencode({"query": query, "per_page": limit})
+    if kind == "pixabay":
+        # Pixabay's video API rejects per_page values below 3.
+        limit = max(3, min(200, int(limit or 12)))
+        return "https://pixabay.com/api/videos/?" + urllib.parse.urlencode({"q": query, "per_page": limit})
+    raise RuntimeError("不支持的素材平台")
+
+
+def material_search_request(kind, query, provider):
+    key = str(provider.get("api_key") or "").strip()
+    if not key:
+        raise RuntimeError(f"{provider.get('name') or kind} 缺少 API Key。")
+    url = material_search_url(kind, query, provider.get("result_limit") or 12)
+    headers = {
+        "Accept": "application/json",
+        # Pexels' Cloudflare edge rejects Python's default urllib signature.
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+    }
+    if kind == "pexels":
+        headers["Authorization"] = key
+        return urllib.request.Request(url, headers=headers, method="GET")
+    separator = "&" if "?" in url else "?"
+    return urllib.request.Request(f"{url}{separator}{urllib.parse.urlencode({'key': key})}", headers=headers, method="GET")
+
+
+def normalize_material_candidates(kind, payload, query):
+    candidates = []
+    if kind == "pexels":
+        for video in payload.get("videos", []) if isinstance(payload, dict) else []:
+            files = [item for item in video.get("video_files", []) if item.get("link")]
+            files.sort(key=lambda item: (int(item.get("width") or 0), int(item.get("height") or 0)), reverse=True)
+            candidates.append({
+                "id": f"pexels-{video.get('id')}",
+                "source": "pexels",
+                "title": f"Pexels video {video.get('id')}",
+                "description": str(video.get("url") or ""),
+                "url": str(video.get("url") or ""),
+                "preview_url": str(video.get("image") or ""),
+                "download_url": str(files[0].get("link") or "") if files else "",
+                "duration": int(video.get("duration") or 0),
+                "width": int(video.get("width") or 0),
+                "height": int(video.get("height") or 0),
+                "matched_query": query,
+            })
+    elif kind == "pixabay":
+        for video in payload.get("hits", []) if isinstance(payload, dict) else []:
+            files = video.get("videos") or {}
+            source = files.get("large") or files.get("medium") or files.get("small") or {}
+            candidates.append({
+                "id": f"pixabay-{video.get('id')}",
+                "source": "pixabay",
+                "title": str(video.get("tags") or "Pixabay video"),
+                "description": str(video.get("tags") or ""),
+                "url": str(video.get("pageURL") or ""),
+                "preview_url": str(video.get("picture_id") or ""),
+                "download_url": str(source.get("url") or ""),
+                "duration": int(video.get("duration") or 0),
+                "width": int(source.get("width") or 0),
+                "height": int(source.get("height") or 0),
+                "matched_query": query,
+            })
+    return candidates
+
+
+def search_material_provider(kind, query, provider):
+    request = material_search_request(kind, query, provider)
+    try:
+        with open_public_request(request, timeout=35) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:400]
+        raise RuntimeError(f"{provider.get('name') or kind} 搜索失败：HTTP {exc.code} {detail}") from exc
+    except ExternalNetworkError as exc:
+        raise RuntimeError(f"{provider.get('name') or kind} 网络连接失败：{exc}") from exc
+    except (ValueError, urllib.error.URLError, OSError) as exc:
+        raise RuntimeError(f"{provider.get('name') or kind} 搜索失败：{exc}") from exc
+    return normalize_material_candidates(kind, payload, query)
+
+
+def normalize_broll_input(value, max_chars=12000):
+    """Normalize free-form script or shot notes without requiring one shot per line."""
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    return "\n".join(lines)[:max_chars].strip()
+
+
+def broll_search_queries(requirements):
+    input_text = normalize_broll_input("\n".join(str(item) for item in requirements) if isinstance(requirements, (list, tuple)) else requirements)
+    prompt = f"""你是短视频 B-roll 素材检索编辑。输入可能是整段脚本、自然语言分镜描述、带编号的列表或混合格式，不要求每行只有一条需求。
+请先自行识别其中需要 B-roll 的镜头边界，再把每个镜头需求转换为适合 Pexels 和 Pixabay 视频搜索的英文检索词。
+要求：输出 1 到 20 条镜头需求；每条给 2 到 3 条具体、可拍摄的英文短语，使用主体 + 动作 + 场景，不要抽象概念或品牌名；保留简洁的中文镜头描述。
+仅返回 JSON：{{\"items\":[{{\"requirement\":\"中文镜头需求\",\"queries\":[\"english query\"]}}]}}。
+输入文本：
+{input_text}"""
+    result = llm_json(prompt, max_tokens=2200)
+    items = result.get("items") if isinstance(result, dict) else None
+    if not isinstance(items, list):
+        raise RuntimeError("LLM 未返回可用的 B-roll 检索词。")
+    plans = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        requirement = str(item.get("requirement") or "").strip()
+        queries = [str(query).strip() for query in item.get("queries", []) if str(query).strip()]
+        if requirement and queries:
+            plans.append({"requirement": requirement[:240], "queries": queries[:3]})
+    if not plans:
+        raise RuntimeError("LLM 未返回可用的 B-roll 检索词。")
+    return plans[:20]
+
+
+def broll_rank_candidates(requirement, candidates):
+    if not candidates:
+        return []
+    compact = [{
+        "id": item["id"], "title": item["title"], "description": item["description"],
+        "source": item["source"], "duration": item["duration"], "width": item["width"],
+        "height": item["height"], "query": item["matched_query"],
+    } for item in candidates[:16]]
+    prompt = f"""你是视频素材导演。根据 B-roll 需求，对候选视频元数据按画面主体、动作和场景的贴合度排序。
+不要依据热度；不能从元数据证明相关的素材应排后。优先横屏，输出每条一句简短中文理由。
+仅返回 JSON：{{\"ranked\":[{{\"id\":\"候选 id\",\"reason\":\"理由\"}}]}}。
+B-roll 需求：{requirement}
+候选：{json.dumps(compact, ensure_ascii=False)}"""
+    try:
+        result = llm_json(prompt, max_tokens=1600)
+        ranked = result.get("ranked") if isinstance(result, dict) else []
+    except RuntimeError:
+        ranked = []
+    by_id = {item["id"]: item for item in candidates}
+    selected = []
+    for item in ranked if isinstance(ranked, list) else []:
+        candidate = by_id.pop(str(item.get("id") or ""), None)
+        if candidate:
+            candidate["reason"] = str(item.get("reason") or "元数据与镜头需求匹配。")[:180]
+            selected.append(candidate)
+    for candidate in by_id.values():
+        candidate["reason"] = candidate.get("reason") or "按素材平台文本匹配结果返回。"
+        selected.append(candidate)
+    return selected[:8]
+
+
+def search_broll_requirements(requirements, progress_callback=None):
+    input_text = normalize_broll_input(requirements)
+    if not input_text:
+        raise RuntimeError("请至少输入一条 B-roll 需求。")
+    def report(progress, message):
+        if progress_callback:
+            progress_callback(max(0.0, min(1.0, float(progress))), message)
+
+    report(0.03, "正在准备 B-roll 检索")
+    providers = {kind: enabled_provider(kind) for kind in ("pexels", "pixabay")}
+    missing = [kind for kind, provider in providers.items() if not provider or not provider.get("api_key")]
+    if missing:
+        raise RuntimeError("请先在供应商管理中启用：" + "、".join(kind.title() for kind in missing))
+    report(0.12, "LLM 正在生成检索词")
+    query_plans = broll_search_queries(input_text)
+    report(0.22, f"已生成 {len(query_plans)} 条分镜的检索词")
+    results = []
+    total_operations = max(1, len(query_plans) * len(providers))
+    completed_operations = 0
+    for plan_index, plan in enumerate(query_plans, start=1):
+        groups = []
+        for kind, provider in providers.items():
+            operation_start = 0.22 + (completed_operations / total_operations) * 0.68
+            report(operation_start, f"正在搜索 {kind.title()} · 分镜 {plan_index}/{len(query_plans)}")
+            seen = set()
+            candidates = []
+            for query in plan["queries"]:
+                for candidate in search_material_provider(kind, query, provider):
+                    if candidate["id"] not in seen:
+                        candidates.append(candidate)
+                        seen.add(candidate["id"])
+                if len(candidates) >= 16:
+                    break
+            report(
+                operation_start + (0.28 / total_operations) * 0.68,
+                f"LLM 正在进行 {kind.title()} 元数据重排 · 分镜 {plan_index}/{len(query_plans)}",
+            )
+            groups.append({"provider": kind, "items": broll_rank_candidates(plan["requirement"], candidates)})
+            completed_operations += 1
+            report(
+                0.22 + (completed_operations / total_operations) * 0.68,
+                f"已完成 {kind.title()} 搜索与重排 · 分镜 {plan_index}/{len(query_plans)}",
+            )
+        results.append({"requirement": plan["requirement"], "queries": plan["queries"], "providers": groups})
+    report(0.96, "正在整理 B-roll 检索结果")
+    report(1, "B-roll 检索结果已整理完成")
+    return results
+
+
+def broll_search_worker(task_id, requirements):
+    try:
+        set_broll_task(
+            task_id,
+            status="running",
+            stage="preparing",
+            progress=0.01,
+            progress_label="B-roll 检索进度",
+            message="正在启动 B-roll 检索",
+            started_at=datetime.now().isoformat(timespec="seconds"),
+        )
+
+        def update_progress(progress, message):
+            lowered = str(message or "")
+            if "生成检索词" in lowered:
+                stage = "querying"
+            elif "元数据重排" in lowered:
+                stage = "ranking"
+            elif "搜索" in lowered:
+                stage = "searching"
+            elif "整理" in lowered:
+                stage = "finalizing"
+            else:
+                stage = "preparing"
+            set_broll_task(
+                task_id,
+                status="running",
+                stage=stage,
+                progress=progress,
+                progress_label="B-roll 检索进度",
+                message=message,
+            )
+
+        results = search_broll_requirements(requirements, progress_callback=update_progress)
+        set_broll_task(
+            task_id,
+            status="done",
+            stage="done",
+            progress=1,
+            progress_label="B-roll 检索进度",
+            message=f"B-roll 检索完成：已处理 {len(results)} 条分镜需求",
+            results=results,
+            requirement_count=len(results),
+        )
+    except Exception as exc:
+        current = get_broll_task(task_id)
+        set_broll_task(
+            task_id,
+            status="error",
+            stage="error",
+            progress=current.get("progress", 0),
+            progress_label="B-roll 检索进度",
+            message=str(exc),
+            error=str(exc),
+        )
+    finally:
+        global ACTIVE_BROLL_SEARCH_TASK_ID
+        with BROLL_SEARCH_LOCK:
+            if ACTIVE_BROLL_SEARCH_TASK_ID == task_id:
+                ACTIVE_BROLL_SEARCH_TASK_ID = None
+
+
+def start_broll_search(payload):
+    global ACTIVE_BROLL_SEARCH_TASK_ID
+    payload = payload or {}
+    requirements = normalize_broll_input(payload.get("requirements"))
+    if not requirements:
+        raise RuntimeError("请至少输入一条 B-roll 需求。")
+    with BROLL_SEARCH_LOCK:
+        active_task = get_broll_task(ACTIVE_BROLL_SEARCH_TASK_ID) if ACTIVE_BROLL_SEARCH_TASK_ID else {}
+        if active_task.get("status") in {"queued", "running"}:
+            return active_task
+        task_id = f"broll-search-{uuid4().hex[:12]}"
+        task = set_broll_task(
+            task_id,
+            kind="broll_search",
+            status="queued",
+            stage="queued",
+            progress=0,
+            progress_label="B-roll 检索进度",
+            requirements=requirements,
+            message="已加入 B-roll 检索队列",
+            created_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        ACTIVE_BROLL_SEARCH_TASK_ID = task_id
+    threading.Thread(target=broll_search_worker, args=(task_id, requirements), daemon=True).start()
+    return task
 
 
 def volcengine_settings(payload=None):
@@ -6641,6 +7029,13 @@ class Handler(SimpleHTTPRequestHandler):
                 error_response(self, "找不到 AI 爆款任务", 404)
                 return
             json_response(self, {"ok": True, "task": task})
+        elif path == "/api/broll/search/status":
+            task_id = query.get("task_id", [""])[0]
+            task = get_broll_task(task_id)
+            if not task:
+                error_response(self, "找不到 B-roll 检索任务", 404)
+                return
+            json_response(self, {"ok": True, "task": task})
         elif path == "/api/trends/import/status":
             task_id = query.get("task_id", [""])[0]
             task = get_trend_task(task_id)
@@ -6698,6 +7093,8 @@ class Handler(SimpleHTTPRequestHandler):
                 "settings_initialized": (not IS_FROZEN) or PACKAGED_PROFILE_MARKER.exists(),
                 "llm": [public_provider(item, "llm") for item in saved.get("llm_providers", [])],
                 "volcengine": [public_provider(item, "volcengine") for item in saved.get("volcengine_providers", [])],
+                "pexels": [public_provider(item, "pexels") for item in saved.get("pexels_providers", [])],
+                "pixabay": [public_provider(item, "pixabay") for item in saved.get("pixabay_providers", [])],
             })
         else:
             self.send_error(404)
@@ -6722,6 +7119,10 @@ class Handler(SimpleHTTPRequestHandler):
                     json_response(self, {"ok": True, **fetch_llm_models(payload)})
                 elif path == "/api/providers/llm-test":
                     json_response(self, {"ok": True, **test_llm_provider(payload.get("provider_id"))})
+                elif path == "/api/providers/material-test":
+                    json_response(self, {"ok": True, **test_material_provider(payload.get("provider_id"), payload.get("kind"))})
+                elif path == "/api/broll/search":
+                    json_response(self, {"ok": True, "task": start_broll_search(payload)})
                 elif path == "/api/transcribe/start":
                     self.handle_transcribe_start(payload)
                 elif path == "/api/transcribe/control":
@@ -7227,10 +7628,10 @@ class Handler(SimpleHTTPRequestHandler):
 
     def handle_providers(self, payload):
         kind = payload.get("kind")
-        if kind not in {"llm", "volcengine"}:
+        if kind not in PROVIDER_COLLECTIONS:
             raise RuntimeError("未知供应商类型")
         saved = provider_settings()
-        collection_key = "llm_providers" if kind == "llm" else "volcengine_providers"
+        collection_key = provider_collection_key(kind)
         providers = saved.setdefault(collection_key, [])
         action = payload.get("action") or "save"
         provider_id_value = (payload.get("id") or "").strip()
@@ -7269,7 +7670,7 @@ class Handler(SimpleHTTPRequestHandler):
                 if not base_url or not model:
                     raise RuntimeError("LLM 的接口 URL 和模型不能为空。")
                 provider.update({"protocol": protocol, "base_url": base_url, "model": model})
-            else:
+            elif kind == "volcengine":
                 provider.update({
                     "resource_id": (payload.get("resource_id") or "volc.seedasr.auc").strip(),
                     "audio_url": (payload.get("audio_url") or "").strip(),
@@ -7286,6 +7687,9 @@ class Handler(SimpleHTTPRequestHandler):
                 tos_secret_key = (payload.get("tos_secret_key") or "").strip()
                 if tos_secret_key:
                     provider["tos_secret_key"] = tos_secret_key
+            else:
+                result_limit = int(float(payload.get("result_limit") or 12))
+                provider.update({"result_limit": max(1, min(30, result_limit))})
             provider["enabled"] = bool(payload.get("enabled"))
             if provider["enabled"]:
                 for item in providers:
@@ -7303,6 +7707,8 @@ class Handler(SimpleHTTPRequestHandler):
             "settings_initialized": (not IS_FROZEN) or PACKAGED_PROFILE_MARKER.exists(),
             "llm": [public_provider(item, "llm") for item in saved.get("llm_providers", [])],
             "volcengine": [public_provider(item, "volcengine") for item in saved.get("volcengine_providers", [])],
+            "pexels": [public_provider(item, "pexels") for item in saved.get("pexels_providers", [])],
+            "pixabay": [public_provider(item, "pixabay") for item in saved.get("pixabay_providers", [])],
         })
 
     def handle_render_preview(self, payload):

@@ -135,6 +135,7 @@ def build_release() -> None:
     if not (PUBLISHERS_DIR / "xhs-mcp" / "node_modules").is_dir():
         raise RuntimeError("xhs-mcp dependencies are missing. Run npm install in vendor/publishers/xhs-mcp first.")
     require_build_dependency("PyInstaller", "pyinstaller")
+    require_build_dependency("certifi", "certifi")
     tos_version = require_build_dependency("tos", "tos")
     require_build_dependency("yt_dlp", "yt-dlp")
     require_build_dependency("playwright", "playwright")
@@ -237,6 +238,8 @@ def build_release() -> None:
                 data_arg(node, "bin"),
                 "--collect-all",
                 "tos",
+                "--collect-all",
+                "certifi",
                 "--collect-all",
                 "playwright",
             ],

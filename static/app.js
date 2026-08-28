@@ -33,10 +33,11 @@ const state = {
   uploadPromise: null,
   transcribeControlPending: false,
   providerKind: "llm",
-  providers: { llm: [], volcengine: [] },
+  providers: { llm: [], volcengine: [], pexels: [], pixabay: [] },
   providersPackaged: false,
   providerSettingsInitialized: true,
   providerModels: [],
+  broll: { results: [], requirements: "", taskId: null, timer: null, statusMessage: "" },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -55,7 +56,7 @@ const el = {
   appViews: {
     trends: $("trendsView"),
     workbench: $("workbenchView"),
-    editing: $("editingView"),
+    broll: $("brollView"),
     publishing: $("publishingView"),
     providers: $("providersView"),
     "provider-list": $("providerListView"),
@@ -63,6 +64,16 @@ const el = {
     storage: $("storageView"),
   },
   navItems: Array.from(document.querySelectorAll("[data-view]")),
+  brollRequirementsInput: $("brollRequirementsInput"),
+  brollSearchButton: $("brollSearchButton"),
+  brollOpenGaButton: $("brollOpenGaButton"),
+  brollSearchStatus: $("brollSearchStatus"),
+  brollSearchProgress: $("brollSearchProgress"),
+  brollSearchProgressBar: $("brollSearchProgressBar"),
+  brollSearchProgressText: $("brollSearchProgressText"),
+  brollSearchProgressMessage: $("brollSearchProgressMessage"),
+  brollResults: $("brollResults"),
+  brollProviderBadge: $("brollProviderBadge"),
   viewTitle: $("viewTitle"),
   viewSubtitle: $("viewSubtitle"),
   workbenchTabs: $("workbenchTabs"),
@@ -206,6 +217,10 @@ const el = {
   providerTosPrefix: $("providerTosPrefix"),
   providerTosUrlExpires: $("providerTosUrlExpires"),
   providerEnabled: $("providerEnabled"),
+  materialProviderFields: $("materialProviderFields"),
+  materialProviderName: $("materialProviderName"),
+  materialProviderApiKey: $("materialProviderApiKey"),
+  materialResultLimit: $("materialResultLimit"),
   clipCount: $("clipCount"),
   minSeconds: $("minSeconds"),
   maxSeconds: $("maxSeconds"),
@@ -276,6 +291,12 @@ const el = {
   healthSummary: $("healthSummary"),
   healthList: $("healthList"),
 };
+
+if (el.providerForm && el.materialProviderFields && !el.providerForm.contains(el.materialProviderFields)) {
+  const enabledLabel = el.providerEnabled?.closest(".checkline");
+  if (enabledLabel) el.providerForm.insertBefore(el.materialProviderFields, enabledLabel);
+  else el.providerForm.appendChild(el.materialProviderFields);
+}
 
 
 function formatBytes(bytes) {
@@ -907,7 +928,7 @@ function groupTranscriptSegments(segments = []) {
 }
 
 function switchView(view) {
-  const next = ["trends", "workbench", "editing", "publishing", "providers", "provider-list", "tasks", "storage"].includes(view) ? view : "workbench";
+  const next = ["trends", "workbench", "broll", "publishing", "providers", "provider-list", "tasks", "storage"].includes(view) ? view : "workbench";
   state.currentView = next;
   Object.entries(el.appViews || {}).forEach(([key, node]) => { if (node) node.hidden = key !== next; });
   (el.navItems || []).forEach((button) => {
@@ -918,9 +939,9 @@ function switchView(view) {
   const titles = {
     trends: ["AI 爆款发现", "让 AI 从近期商业资讯中筛选选题与视频素材"],
     workbench: ["金句提取", "转写、分析、裁剪与导出"],
-    editing: ["剪辑成片", "将金句片段组合为可发布成片"],
+    broll: ["B-roll 素材检索", "输入脚本或分镜描述，自动生成检索词并从素材平台召回视频"],
     publishing: ["一键发布", "统一编排内容并创建多平台发布任务"],
-    providers: ["供应商管理", "管理 LLM 与火山语音转写配置"],
+    providers: ["供应商管理", "管理 LLM、语音转写与视频素材平台配置"],
     "provider-list": [providerKindLabel(state.providerKind) + "配置", "查看、编辑并选择当前工作台使用的配置"],
     tasks: ["任务中心", "总览所有视频的后台处理进度"],
     storage: ["存储管理", "按原视频查看本地结果文件"],
@@ -929,6 +950,7 @@ function switchView(view) {
   if (el.viewSubtitle) el.viewSubtitle.textContent = titles[next][1];
   if (next === "tasks") refreshTasks().catch(() => {});
   if (next === "providers" || next === "provider-list") refreshProviders().catch(() => {});
+  if (next === "broll") refreshBrollState();
   if (next === "storage") { refreshLibrary().catch(() => {}); refreshStorage().catch(() => {}); }
   if (next === "publishing") { refreshPublishCapabilities().catch(() => {}); refreshPublishAssets().catch(() => {}); refreshPublishTasks().catch(() => {}); refreshPublishLoginTasks().catch(() => {}); }
 }
@@ -2279,7 +2301,7 @@ function syncTranscribeEngineUI() {
 if (el.transcribeEngine) el.transcribeEngine.addEventListener("change", syncTranscribeEngineUI);
 
 function providerKindLabel(kind) {
-  return kind === "volcengine" ? "火山" : "LLM";
+  return ({ volcengine: "火山", pexels: "Pexels", pixabay: "Pixabay" })[kind] || "LLM";
 }
 
 function providerProtocolLabel(protocol) {
@@ -2289,6 +2311,127 @@ function providerProtocolLabel(protocol) {
 function activeProvider(kind) {
   return (state.providers[kind] || []).find((item) => item.enabled);
 }
+
+function materialProviderLabel(kind) {
+  return kind === "pexels" ? "Pexels" : "Pixabay";
+}
+
+function refreshBrollState() {
+  const llm = activeProvider("llm");
+  const pexels = activeProvider("pexels");
+  const pixabay = activeProvider("pixabay");
+  const ready = Boolean(llm && pexels && pixabay);
+  if (el.brollSearchButton) el.brollSearchButton.disabled = !ready || Boolean(state.broll.taskId);
+  if (el.brollProviderBadge) el.brollProviderBadge.textContent = ready ? "LLM + Pexels + Pixabay 已就绪" : "请在供应商管理中启用 LLM、Pexels 和 Pixabay";
+  if (el.brollSearchStatus && !state.broll.results.length) {
+    el.brollSearchStatus.textContent = state.broll.statusMessage || (ready ? "可粘贴整段脚本或分镜描述，LLM 会自动拆分并生成检索词。" : "请先配置并启用 LLM、Pexels 与 Pixabay。");
+  }
+}
+
+function clearBrollPoll() {
+  if (state.broll.timer) {
+    window.clearTimeout(state.broll.timer);
+    state.broll.timer = null;
+  }
+}
+
+function renderBrollProgress(task) {
+  if (!el.brollSearchProgress) return;
+  if (!task) {
+    el.brollSearchProgress.hidden = true;
+    return;
+  }
+  const percent = Math.max(0, Math.min(100, Number(task.percent ?? Math.round((task.progress || 0) * 100))));
+  el.brollSearchProgress.hidden = false;
+  if (el.brollSearchProgressBar) el.brollSearchProgressBar.style.width = percent + "%";
+  el.brollSearchProgress.querySelector(".broll-progress-track")?.setAttribute("aria-valuenow", String(percent));
+  if (el.brollSearchProgressText) el.brollSearchProgressText.textContent = (task.progress_label || "B-roll 检索进度") + " " + percent + "%";
+  if (el.brollSearchProgressMessage) el.brollSearchProgressMessage.textContent = task.message || "正在处理";
+}
+
+function renderBrollResults() {
+  if (!el.brollResults) return;
+  const results = state.broll.results || [];
+  if (!results.length) {
+    el.brollResults.className = "broll-results broll-results-empty";
+    el.brollResults.textContent = "提交脚本或分镜描述后，这里会显示召回、检索词和 LLM 排名。";
+    return;
+  }
+  el.brollResults.className = "broll-results";
+  el.brollResults.innerHTML = results.map((item, index) => `<article class="broll-result-card"><div class="broll-result-head"><span class="broll-result-index">${String(index + 1).padStart(2, "0")}</span><div><strong>${escapeHtml(item.requirement || "镜头需求")}</strong><small>检索词：${escapeHtml((item.queries || []).join(" · "))}</small></div></div><div class="broll-provider-results">${(item.providers || []).map((group) => `<div class="broll-provider-group"><div class="broll-provider-title"><strong>${escapeHtml(materialProviderLabel(group.provider))}</strong><span>${group.items?.length || 0} 个候选</span></div>${(group.items || []).map((candidate) => `<div class="broll-candidate"><div><strong>${escapeHtml(candidate.title || "未命名素材")}</strong><small>${escapeHtml(candidate.duration ? `${candidate.duration}s · ` : "")}${escapeHtml(candidate.reason || "")}</small></div><a href="${escapeHtml(candidate.url || "#")}" target="_blank" rel="noreferrer">打开素材</a></div>`).join("") || `<div class="broll-empty">没有召回候选。</div>`}</div>`).join("")}</div></article>`).join("");
+}
+
+async function searchBrollAsync() {
+  const text = el.brollRequirementsInput?.value.trim() || "";
+  if (!text) { toast("请先输入脚本或分镜需求。"); return; }
+  clearBrollPoll();
+  state.broll.taskId = null;
+  state.broll.results = [];
+  state.broll.statusMessage = "已提交 B-roll 检索任务...";
+  renderBrollResults();
+  el.brollSearchButton.disabled = true;
+  el.brollSearchStatus.textContent = state.broll.statusMessage;
+  renderBrollProgress({ progress: 0, percent: 0, progress_label: "B-roll 检索进度", message: "已提交检索任务" });
+  try {
+    const data = await api("/api/broll/search", { method: "POST", body: JSON.stringify({ requirements: text, async: true }) });
+    const task = data.task;
+    if (!task?.task_id) throw new Error("B-roll 检索任务未返回任务 ID");
+    state.broll.requirements = text;
+    state.broll.taskId = task.task_id;
+    renderBrollProgress(task);
+    await pollBrollSearch(task.task_id);
+  } catch (error) {
+    state.broll.taskId = null;
+    state.broll.statusMessage = error.message;
+    renderBrollProgress({ progress: 0, percent: 0, progress_label: "B-roll 检索进度", message: "任务提交失败" });
+    el.brollSearchStatus.textContent = state.broll.statusMessage;
+    toast("B-roll 检索失败：" + error.message);
+    refreshBrollState();
+  }
+}
+
+async function pollBrollSearch(taskId) {
+  clearBrollPoll();
+  try {
+    const data = await api("/api/broll/search/status?task_id=" + encodeURIComponent(taskId));
+    if (state.broll.taskId !== taskId) return;
+    const task = data.task || {};
+    renderBrollProgress(task);
+    if (["queued", "running"].includes(task.status)) {
+      state.broll.statusMessage = task.message || "B-roll 检索进行中...";
+      el.brollSearchStatus.textContent = state.broll.statusMessage;
+      state.broll.timer = window.setTimeout(() => pollBrollSearch(taskId), 900);
+      return;
+    }
+    state.broll.taskId = null;
+    if (task.status === "done") {
+      state.broll.results = task.results || [];
+      renderBrollResults();
+      state.broll.statusMessage = "已完成 " + state.broll.results.length + " 条分镜的素材检索。";
+      el.brollSearchStatus.textContent = state.broll.statusMessage;
+    } else {
+      state.broll.statusMessage = "B-roll 检索失败：" + (task.message || task.error || "未知错误");
+      el.brollSearchStatus.textContent = state.broll.statusMessage;
+      toast(state.broll.statusMessage);
+    }
+    refreshBrollState();
+  } catch (error) {
+    if (state.broll.taskId !== taskId) return;
+    state.broll.taskId = null;
+    state.broll.statusMessage = "B-roll 检索失败：" + error.message;
+    renderBrollProgress({ progress: 0, percent: 0, progress_label: "B-roll 检索进度", message: "进度查询失败" });
+    el.brollSearchStatus.textContent = state.broll.statusMessage;
+    toast(state.broll.statusMessage);
+    refreshBrollState();
+  }
+}
+
+el.brollSearchButton?.addEventListener("click", searchBrollAsync);
+el.brollOpenGaButton?.addEventListener("click", () => {
+  const text = el.brollRequirementsInput?.value.trim() || "";
+  const query = encodeURIComponent(text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)[0] || "视频素材");
+  window.open(`https://ga.nasuyun.com/video?keyword=${query}`, "_blank", "noopener,noreferrer");
+});
 
 function activeLlmModelLabel() {
   const provider = activeProvider("llm");
@@ -2372,8 +2515,8 @@ function renderProviderList() {
     el.providerList.innerHTML = `<div class="provider-empty">${packagedEmpty ? `当前打包版尚未配置${providerKindLabel(kind)}，新增一条即可在工作台使用。` : `暂无${providerKindLabel(kind)}配置，新增一条即可在工作台使用。`}</div>`;
     return;
   }
-  const modelLabel = kind === "llm" ? "模型" : "服务";
-  el.providerList.innerHTML = `<div class="provider-table"><div class="provider-row provider-head"><span>名称</span><span>状态</span><span>${modelLabel}</span><span>操作</span></div>${items.map((item) => `<div class="provider-row"><span><strong>${escapeHtml(item.name)}</strong><small>${kind === "llm" ? escapeHtml(providerProtocolLabel(item.protocol)) : `Resource ID: ${escapeHtml(item.resource_id || "volc.seedasr.auc")}`}</small></span><span><span class="provider-status ${item.enabled ? "enabled" : "disabled"}">${item.enabled ? "已启用" : "已禁用"}</span></span><span>${escapeHtml(kind === "llm" ? item.model : "火山 BigModel ASR")}</span><span class="provider-actions">${kind === "llm" ? `<button type="button" data-provider-action="test" data-provider-id="${escapeHtml(item.id)}" ${item.enabled ? "" : "disabled"}>测试连接</button>` : ""}<button type="button" data-provider-action="edit" data-provider-id="${escapeHtml(item.id)}">编辑</button><button type="button" data-provider-action="toggle" data-provider-id="${escapeHtml(item.id)}" data-enabled="${item.enabled ? "false" : "true"}">${item.enabled ? "禁用" : "启用"}</button><button class="danger" type="button" data-provider-action="delete" data-provider-id="${escapeHtml(item.id)}">删除</button></span></div>`).join("")}</div>`;
+  const modelLabel = kind === "llm" ? "模型" : kind === "volcengine" ? "服务" : "返回数量";
+  el.providerList.innerHTML = `<div class="provider-table"><div class="provider-row provider-head"><span>名称</span><span>状态</span><span>${modelLabel}</span><span>操作</span></div>${items.map((item) => `<div class="provider-row"><span><strong>${escapeHtml(item.name)}</strong><small>${kind === "llm" ? escapeHtml(providerProtocolLabel(item.protocol)) : kind === "volcengine" ? `Resource ID: ${escapeHtml(item.resource_id || "volc.seedasr.auc")}` : `${escapeHtml(materialProviderLabel(kind))} 视频 API`}</small></span><span><span class="provider-status ${item.enabled ? "enabled" : "disabled"}">${item.enabled ? "已启用" : "已禁用"}</span></span><span>${escapeHtml(kind === "llm" ? item.model : kind === "volcengine" ? "火山 BigModel ASR" : `${item.result_limit || 12} 条`)}</span><span class="provider-actions">${kind !== "volcengine" ? `<button type="button" data-provider-action="test" data-provider-id="${escapeHtml(item.id)}" ${item.enabled ? "" : "disabled"}>测试连接</button>` : ""}<button type="button" data-provider-action="edit" data-provider-id="${escapeHtml(item.id)}">编辑</button><button type="button" data-provider-action="toggle" data-provider-id="${escapeHtml(item.id)}" data-enabled="${item.enabled ? "false" : "true"}">${item.enabled ? "禁用" : "启用"}</button><button class="danger" type="button" data-provider-action="delete" data-provider-id="${escapeHtml(item.id)}">删除</button></span></div>`).join("")}</div>`;
   el.providerList.querySelectorAll("[data-provider-action]").forEach((button) => button.addEventListener("click", async () => {
     const item = items.find((candidate) => candidate.id === button.dataset.providerId);
     if (!item) return;
@@ -2387,7 +2530,7 @@ function renderProviderList() {
       const originalLabel = button.textContent;
       button.textContent = "测试中...";
       try {
-        const result = await api("/api/providers/llm-test", { method: "POST", body: JSON.stringify({ provider_id: item.id }) });
+        const result = await api(kind === "llm" ? "/api/providers/llm-test" : kind === "volcengine" ? "/api/providers/volcengine-test" : "/api/providers/material-test", { method: "POST", body: JSON.stringify({ provider_id: item.id, kind }) });
         toast(`${result.provider_name} 连接正常，耗时 ${result.elapsed_ms} ms。`);
       } catch (error) {
         toast(`连接测试失败：${error.message}`);
@@ -2412,21 +2555,29 @@ function showProviderForm(item = null) {
   const kind = state.providerKind;
   if (!el.providerForm) return;
   const isLlm = kind === "llm";
+  const isMaterial = kind === "pexels" || kind === "pixabay";
+  const isVolcengine = kind === "volcengine";
   const nameInput = isLlm ? el.providerName : el.volcProviderName;
   const apiKeyInput = isLlm ? el.providerApiKey : el.volcProviderApiKey;
+  const activeNameInput = isMaterial ? el.materialProviderName : nameInput;
+  const activeApiKeyInput = isMaterial ? el.materialProviderApiKey : apiKeyInput;
   el.providerForm.hidden = false;
   el.providerId.value = item?.id || "";
   el.providerKind.value = kind;
   el.providerFormTitle.textContent = item ? `编辑${providerKindLabel(kind)}配置` : `新增${providerKindLabel(kind)}配置`;
-  nameInput.value = item?.name || (isLlm ? "" : "火山语音转写");
-  apiKeyInput.value = "";
-  apiKeyInput.placeholder = item?.has_api_key ? "已保存（留空不修改）" : "API Key";
-  apiKeyInput.required = !item;
+  activeNameInput.value = item?.name || (isLlm ? "" : isMaterial ? materialProviderLabel(kind) : "火山语音转写");
+  activeApiKeyInput.value = "";
+  activeApiKeyInput.placeholder = item?.has_api_key ? "已保存（留空不修改）" : "API Key";
+  el.providerApiKey.required = isLlm && !item;
+  el.volcProviderApiKey.required = isVolcengine && !item;
+  el.materialProviderApiKey.required = isMaterial && !item;
   el.providerName.required = isLlm;
-  el.volcProviderName.required = !isLlm;
+  el.volcProviderName.required = isVolcengine;
+  el.materialProviderName.required = isMaterial;
   if (el.providerModel) el.providerModel.required = isLlm;
   el.llmProviderFields.hidden = !isLlm;
-  el.volcProviderFields.hidden = isLlm;
+  el.volcProviderFields.hidden = !isVolcengine;
+  el.materialProviderFields.hidden = !isMaterial;
   el.providerBaseUrl.value = item?.base_url || "";
   el.providerProtocol.value = item?.protocol || "openai";
   renderProviderModelOptions(state.providerModels, item?.model || "");
@@ -2445,8 +2596,9 @@ function showProviderForm(item = null) {
   el.providerPollInterval.value = item?.poll_interval || 5;
   el.providerTosPrefix.value = item?.tos_prefix || "mp4-golden-asr";
   el.providerTosUrlExpires.value = item?.tos_url_expires || 86400;
+  el.materialResultLimit.value = item?.result_limit || 12;
   el.providerEnabled.checked = item ? Boolean(item.enabled) : true;
-  nameInput.focus();
+  activeNameInput.focus();
 }
 
 function hideProviderForm() {
@@ -2455,7 +2607,7 @@ function hideProviderForm() {
 
 async function refreshProviders() {
   const data = await api("/api/providers");
-  state.providers = { llm: data.llm || [], volcengine: data.volcengine || [] };
+  state.providers = { llm: data.llm || [], volcengine: data.volcengine || [], pexels: data.pexels || [], pixabay: data.pixabay || [] };
   state.providersPackaged = Boolean(data.packaged);
   state.providerSettingsInitialized = data.settings_initialized !== false;
   const llm = activeProvider("llm");
@@ -2464,6 +2616,7 @@ async function refreshProviders() {
   if (el.workbenchVolcStatus) el.workbenchVolcStatus.textContent = volc ? `当前使用：${volc.name}` : "未启用火山配置，请前往供应商管理添加。";
   if (el.analyzeButton) el.analyzeButton.disabled = !llm;
   renderProviderList();
+  refreshBrollState();
   return data;
 }
 
@@ -2486,8 +2639,8 @@ el.providerForm?.addEventListener("submit", async (event) => {
     kind,
     action: "save",
     id: el.providerId.value,
-    name: kind === "llm" ? el.providerName.value.trim() : el.volcProviderName.value.trim(),
-    api_key: kind === "llm" ? el.providerApiKey.value.trim() : el.volcProviderApiKey.value.trim(),
+    name: kind === "llm" ? el.providerName.value.trim() : kind === "volcengine" ? el.volcProviderName.value.trim() : el.materialProviderName.value.trim(),
+    api_key: kind === "llm" ? el.providerApiKey.value.trim() : kind === "volcengine" ? el.volcProviderApiKey.value.trim() : el.materialProviderApiKey.value.trim(),
     enabled: el.providerEnabled.checked,
     protocol: el.providerProtocol.value,
     base_url: el.providerBaseUrl.value.trim(),
@@ -2502,6 +2655,7 @@ el.providerForm?.addEventListener("submit", async (event) => {
     poll_interval: Number(el.providerPollInterval.value || 5),
     tos_prefix: el.providerTosPrefix.value.trim(),
     tos_url_expires: Number(el.providerTosUrlExpires.value || 86400),
+    result_limit: Number(el.materialResultLimit.value || 12),
   };
   try {
     await api("/api/providers", { method: "POST", body: JSON.stringify(payload) });
