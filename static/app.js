@@ -2324,7 +2324,7 @@ function refreshBrollState() {
   if (el.brollSearchButton) el.brollSearchButton.disabled = !ready || Boolean(state.broll.taskId);
   if (el.brollProviderBadge) el.brollProviderBadge.textContent = ready ? "LLM + Pexels + Pixabay 已就绪" : "请在供应商管理中启用 LLM、Pexels 和 Pixabay";
   if (el.brollSearchStatus && !state.broll.results.length) {
-    el.brollSearchStatus.textContent = state.broll.statusMessage || (ready ? "可粘贴整段脚本或分镜描述，LLM 会自动拆分并生成检索词。" : "请先配置并启用 LLM、Pexels 与 Pixabay。");
+    el.brollSearchStatus.textContent = state.broll.statusMessage || (ready ? "请用换行分隔已有分镜头，LLM 会逐条生成检索词，不会重新拆分镜头。" : "请先配置并启用 LLM、Pexels 与 Pixabay。");
   }
 }
 

@@ -5218,27 +5218,38 @@ def normalize_broll_input(value, max_chars=12000):
 
 def broll_search_queries(requirements):
     input_text = normalize_broll_input("\n".join(str(item) for item in requirements) if isinstance(requirements, (list, tuple)) else requirements)
-    prompt = f"""你是短视频 B-roll 素材检索编辑。输入可能是整段脚本、自然语言分镜描述、带编号的列表或混合格式，不要求每行只有一条需求。
-请先自行识别其中需要 B-roll 的镜头边界，再把每个镜头需求转换为适合 Pexels 和 Pixabay 视频搜索的英文检索词。
-要求：输出 1 到 20 条镜头需求；每条给 2 到 3 条具体、可拍摄的英文短语，使用主体 + 动作 + 场景，不要抽象概念或品牌名；保留简洁的中文镜头描述。
+    shot_inputs = [line.strip() for line in input_text.split("\n") if line.strip()]
+    if not shot_inputs:
+        raise RuntimeError("请至少输入一条 B-roll 分镜头需求。")
+    if len(shot_inputs) > 20:
+        raise RuntimeError("B-roll 分镜头需求最多支持 20 条。")
+    numbered_shots = "\n".join(f"{index}. {shot}" for index, shot in enumerate(shot_inputs, start=1))
+    prompt = f"""你是短视频 B-roll 素材检索编辑。用户会用换行或空行分隔已经划分好的分镜头需求，输入也可能带编号。
+用户已经完成分镜头划分。不得拆分、合并或改写用户已经提供的分镜头边界；只为每个既有分镜头生成适合 Pexels 和 Pixabay 视频搜索的英文检索词。
+输入共 {len(shot_inputs)} 个分镜头，必须按原顺序输出恰好 {len(shot_inputs)} 个 items。每个 item 一一对应输入中的同序号分镜头，requirement 字段原样回填对应的用户分镜头文本。
+每个分镜头给 2 到 3 条具体、可拍摄的英文短语，使用主体 + 动作 + 场景，不要抽象概念或品牌名。
 仅返回 JSON：{{\"items\":[{{\"requirement\":\"中文镜头需求\",\"queries\":[\"english query\"]}}]}}。
-输入文本：
-{input_text}"""
+用户分镜头（编号仅用于对应，不属于需求内容）：
+{numbered_shots}"""
     result = llm_json(prompt, max_tokens=2200)
     items = result.get("items") if isinstance(result, dict) else None
     if not isinstance(items, list):
         raise RuntimeError("LLM 未返回可用的 B-roll 检索词。")
+    if len(items) != len(shot_inputs):
+        raise RuntimeError(
+            f"LLM 返回的分镜头数量（{len(items)}）与输入数量（{len(shot_inputs)}）不一致，请重试。"
+        )
     plans = []
-    for item in items:
+    for shot_input, item in zip(shot_inputs, items):
         if not isinstance(item, dict):
-            continue
-        requirement = str(item.get("requirement") or "").strip()
+            raise RuntimeError("LLM 返回了无效的 B-roll 分镜头条目，请重试。")
+        requirement = shot_input
         queries = [str(query).strip() for query in item.get("queries", []) if str(query).strip()]
         if requirement and queries:
             plans.append({"requirement": requirement[:240], "queries": queries[:3]})
-    if not plans:
-        raise RuntimeError("LLM 未返回可用的 B-roll 检索词。")
-    return plans[:20]
+        else:
+            raise RuntimeError("LLM 未为每个 B-roll 分镜头返回可用的检索词，请重试。")
+    return plans
 
 
 def broll_rank_candidates(requirement, candidates):

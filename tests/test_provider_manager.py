@@ -54,7 +54,9 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertNotIn("输入每行一条分镜需求即可开始", source)
         self.assertNotIn("输入需求列表后", source)
         self.assertNotIn("输入需求列表后", html)
-        self.assertIn("可粘贴整段脚本、自然语言分镜或混合格式", html)
+        self.assertNotIn("LLM 会自动拆分", source)
+        self.assertNotIn("LLM 会自动拆分", html)
+        self.assertIn("请粘贴已经划分好的分镜头需求", html)
 
     def test_broll_frontend_preserves_error_status_when_refreshing_state(self):
         source = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
@@ -136,6 +138,25 @@ class ProviderManagerTests(unittest.TestCase):
             app.search_broll_requirements(freeform)
 
         planner.assert_called_once_with(freeform)
+
+    def test_broll_query_planner_preserves_user_shot_boundaries(self):
+        prompts = []
+        llm_result = {
+            "items": [
+                {"requirement": "镜头一", "queries": ["factory exterior"]},
+                {"requirement": "镜头二", "queries": ["robotic arm assembly"]},
+                {"requirement": "镜头三", "queries": ["product close up"]},
+            ]
+        }
+        with patch.object(app, "llm_json", side_effect=lambda prompt, **_kwargs: prompts.append(prompt) or llm_result):
+            plans = app.broll_search_queries("镜头一\n\n镜头二\n镜头三")
+
+        self.assertEqual(len(plans), 3)
+        self.assertEqual([item["queries"] for item in plans], [["factory exterior"], ["robotic arm assembly"], ["product close up"]])
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("不得拆分、合并或改写用户已经提供的分镜头边界", prompts[0])
+        self.assertIn("输入共 3 个分镜头", prompts[0])
+        self.assertNotIn("自行识别其中需要 B-roll 的镜头边界", prompts[0])
 
     def test_broll_worker_persists_done_results(self):
         app.BROLL_TASKS.clear()
