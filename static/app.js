@@ -767,6 +767,16 @@ async function api(path, options = {}) {
   return data;
 }
 
+function isTransientFetchError(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return message.includes("fetch") || message.includes("network") || message.includes("connection");
+}
+
+function waitForAnalysisRetry(attempt) {
+  const delay = Math.min(5000, 500 * Math.max(1, attempt));
+  return new Promise((resolve) => setTimeout(resolve, delay));
+}
+
 function updateMetadata(meta) {
   state.metadata = meta;
   if (!meta) {
@@ -2944,12 +2954,30 @@ el.stopButton.addEventListener("click", async () => {
 });
 
 async function pollAnalyzeTask(taskId) {
+  let fetchFailures = 0;
   while (true) {
-    const data = await api(`/api/clips/render-status?task_id=${encodeURIComponent(taskId)}`);
+    let data;
+    try {
+      data = await api(`/api/clips/render-status?task_id=${encodeURIComponent(taskId)}`);
+      fetchFailures = 0;
+    } catch (error) {
+      if (!isTransientFetchError(error)) {
+        throw error;
+      }
+      if (fetchFailures >= 8) {
+        throw new Error("无法读取分析进度，工作台后端连接中断，请重新打开应用后重试。");
+      }
+      fetchFailures += 1;
+      el.analyzeStatus.textContent = `分析任务仍在运行，正在重试连接（${fetchFailures}/8）...`;
+      await waitForAnalysisRetry(fetchFailures);
+      continue;
+    }
     const task = data.task;
     state.analyzeTaskId = taskId;
     setAnalyzeControls(task);
-    await refreshTasks();
+    await refreshTasks().catch((error) => {
+      console.warn("[analysis] task center refresh failed", error);
+    });
     const percent = task.percent ?? Math.round((task.progress || 0) * 100);
     const elapsed = task.elapsed || 0;
     let message = task.message || `${activeLlmModelLabel()} \u5206\u6790\u4e2d`;
@@ -2960,7 +2988,9 @@ async function pollAnalyzeTask(taskId) {
     if (task.status === "done") {
       state.highlights = task.highlights || { clips: [] };
       renderClips();
-      await refreshProviders();
+      await refreshProviders().catch((error) => {
+        console.warn("[analysis] provider refresh failed after completion", error);
+      });
       const count = (state.highlights.clips || []).length;
       el.analyzeStatus.textContent = `\u5206\u6790\u5b8c\u6210\uff0c\u627e\u5230 ${count} \u4e2a\u5019\u9009\u7247\u6bb5`;
       toast(`\u5206\u6790\u5b8c\u6210\uff0c\u627e\u5230 ${count} \u4e2a\u5019\u9009\u7247\u6bb5\u3002`);
@@ -2995,7 +3025,9 @@ el.analyzeButton.addEventListener("click", async () => {
     });
     state.analyzeTaskId = data.task.task_id;
     setAnalyzeControls(data.task);
-    await refreshTasks();
+    await refreshTasks().catch((error) => {
+      console.warn("[analysis] task center refresh failed after submission", error);
+    });
     el.analyzeStatus.textContent = `\u5df2\u53d1\u9001\u7ed9 ${modelLabel}\uff0c\u901a\u5e38\u9700\u8981\u7b49\u5f85 4-5 \u5206\u949f\uff0c\u8fdb\u5ea6\u4f1a\u5728\u8fd9\u91cc\u548c\u4efb\u52a1\u4e2d\u5fc3\u540c\u6b65\u663e\u793a\u3002`;
     await pollAnalyzeTask(data.task.task_id);
   } catch (err) {

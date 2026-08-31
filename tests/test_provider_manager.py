@@ -63,6 +63,15 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertIn("statusMessage", source)
         self.assertRegex(source, re.compile(r"state\.broll\.statusMessage\s*\|\|"))
 
+    def test_analyze_polling_does_not_fail_when_task_list_refresh_is_transiently_unavailable(self):
+        source = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+        polling = source[source.index("async function pollAnalyzeTask"):source.index("el.analyzeButton.addEventListener", source.index("async function pollAnalyzeTask"))]
+        self.assertRegex(
+            polling,
+            re.compile(r"await\s+refreshTasks\(\)\.catch\("),
+        )
+        self.assertIn("无法读取分析进度，工作台后端连接中断", polling)
+
     def test_material_search_urls_keep_query_and_limit(self):
         self.assertIn("query=city", app.material_search_url("pexels", "city", 8))
         self.assertIn("per_page=8", app.material_search_url("pexels", "city", 8))
