@@ -56,6 +56,64 @@
 - 若直连和代理都失败，先记录 DNS、TCP、WinHTTP、防火墙和安全软件结果，再处理网络
   环境；不要在应用层猜测代理地址。
 
+## macOS 打包与运行
+
+### 已打包应用的 TLS 证书校验失败
+
+- 现象：macOS DMG 内的应用请求 DeepSeek 等 HTTPS 服务时显示
+  `SSL: CERTIFICATE_VERIFY_FAILED`、`self-signed certificate in certificate chain`，而源代码模式下请求正常。
+- 原因：PyInstaller 产物不能稳定发现 Python 系统信任根或 `certifi` 的 PEM 数据；源代码环境与冻结后的
+  可执行文件所见的证书路径不同。
+- 处理：`app.py` 的公共 HTTP opener 使用验证模式的 SSL context，同时加载系统默认信任根与
+  `certifi.where()`；发布构建把 `certifi` 列为显式依赖，并用 PyInstaller 的
+  `--collect-all certifi` 复制证书数据。不要为绕过错误关闭 TLS 校验，也不要把代理证书当作常规方案。
+- 验证：在 macOS 已安装的 DMG 中执行供应商连接测试，并确认请求没有
+  `CERTIFICATE_VERIFY_FAILED`；Windows 或源码模式的成功不能替代该验证。
+
+### 转写后“分析金句片段”显示 `fail to fetch`
+
+- 现象：macOS 应用完成文字稿转写后，点击分析金句片段，界面仅显示 `分析失败：fail to fetch`。
+- 原因：前端轮询分析任务时，某些网络/服务端非 JSON 响应直接传播了浏览器原始 `fetch` 异常，
+  没有转换为可诊断的应用错误。
+- 处理：分析任务的前端请求统一解析 HTTP 状态和响应正文，并在轮询、取消或读取任务状态失败时
+  保留服务端的错误信息；后端继续使用统一的 LLM 请求路径。
+- 验证：在 macOS DMG 中完成一次转写并启动分析，确认失败时显示具体 HTTP/服务端信息，
+  成功时状态可从排队、分析中更新到完成。
+
+### DeepSeek 未返回可解析 JSON
+
+- 现象：分析任务显示 `我的ds未返回可解析的内容：模型返回内容中没有可解析的JSON对象`。
+- 原因：OpenAI 兼容接口可能把最终 `content` 留空，或在推理模式下没有产出符合工作台契约的 JSON；
+  此前请求也没有把调用方的 `max_tokens` 实际传给接口。
+- 处理：识别 DeepSeek 直连和兼容网关后，在 OpenAI 请求中发送 `max_tokens`、
+  `response_format: {type: json_object}` 与 `thinking: {type: disabled}`。若首次最终内容为空或
+  不能解析，使用明确的 JSON 输出指令重试一次；仍失败时保留解析错误，不把原始响应伪装为成功。
+- 验证：覆盖 JSON 模式参数、token 预算和“首次空内容、第二次有效 JSON”的回归测试；发布 DMG 后
+  使用真实 DeepSeek 供应商完成一次金句分析。
+
+### Apple Silicon DMG 与本地后端架构不匹配
+
+- 现象：在非 macOS 主机打包，或把 Intel 构建的后端混入 Apple Silicon DMG 时，应用无法运行、
+  后端启动失败或出现架构不匹配。
+- 原因：应用内的 Python/PyInstaller 后端、FFmpeg 和 Electron 原生组件都依赖构建主机架构，
+  Windows 不能产出可验证的 macOS 后端。
+- 处理：仅在 GitHub 的 `macos-15` Apple Silicon runner 上构建；
+  `desktop/scripts/package-macos.js` 对后端 manifest 的 `darwin/arm64`、可执行文件和
+  `app.py` 哈希做打包前校验。自动和手动 macOS workflow 均只保留 `arm64` 矩阵，
+  产物名为 `mp4-golden-clip-workbench-macos-arm64`。
+- 验证：Actions 中只有一个 `macOS arm64` job，且 artifact 内包含 DMG；在 Apple Silicon Mac
+  上启动后确认后端就绪并能执行一次供应商连接测试。
+
+### DMG 交付与 Gatekeeper 提示
+
+- 现象：未签名、未公证的本地 DMG 首次打开时，macOS 可能提示开发者无法验证或阻止启动。
+- 原因：当前发布工作流没有配置 Apple Developer 签名证书和 notarization 凭据。
+- 处理：交付时明确该 DMG 是 Apple Silicon (`arm64`) 构建；在受信任来源确认后，由用户在
+  Finder 中按住 Control 点击应用并选择“打开”，或在“隐私与安全性”中显式允许。不得通过关闭
+  Gatekeeper 或修改系统级安全策略来规避。
+- 验证：在干净的 Apple Silicon macOS 账户中完成挂载、拖拽安装、首次授权和启动；若要消除
+  提示，后续必须配置 Developer ID 签名与 Apple notarization，而非仅重打包。
+
 ## 浏览器启动、Playwright 与窗口生命周期
 
 ### 共享 CDP、黑屏和空白页

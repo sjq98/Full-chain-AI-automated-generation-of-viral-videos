@@ -17,8 +17,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15-intel
-            arch: x64
           - runner: macos-15
             arch: arm64
     timeout-minutes: 90
