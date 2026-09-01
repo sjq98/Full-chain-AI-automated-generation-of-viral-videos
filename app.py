@@ -4880,6 +4880,17 @@ def llm_endpoint(base_url, suffix):
     return f"{normalized}/{suffix.lstrip('/')}"
 
 
+def is_deepseek_provider(provider, base_url=None):
+    """Identify DeepSeek direct or OpenAI-compatible gateway configurations."""
+    provider = provider or {}
+    model = str(provider.get("model") or "").strip().lower()
+    if model.startswith("deepseek"):
+        return True
+    parsed = urllib.parse.urlparse(str(base_url or provider.get("base_url") or ""))
+    host = (parsed.hostname or "").strip().lower()
+    return host == "api.deepseek.com" or host.endswith(".deepseek.com")
+
+
 def llm_provider_from_payload(payload):
     provider_id_value = str(payload.get("provider_id") or payload.get("id") or "").strip()
     if provider_id_value:
@@ -5030,47 +5041,62 @@ def llm_json(prompt, provider_id=None, timeout=180, max_tokens=4096):
             "model": model,
             "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
             "temperature": 0.2,
+            "max_tokens": max_tokens,
         }
+        if is_deepseek_provider(provider, base_url):
+            body["response_format"] = {"type": "json_object"}
+            body["thinking"] = {"type": "disabled"}
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
-    try:
-        with open_public_request(req, timeout=timeout) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"{provider_name} 请求失败: {exc.code} {detail}") from exc
-    except ExternalNetworkError as exc:
-        raise RuntimeError(f"{provider_name} 网络连接失败：{exc}") from exc
-    except RuntimeError:
-        raise
-    except (urllib.error.URLError, OSError) as exc:
-        reason = getattr(exc, "reason", exc)
-        raise RuntimeError(f"{provider_name} 网络连接失败：{reason}") from exc
-    if protocol == "anthropic":
-        content = result.get("content")
-    else:
-        choices = result.get("choices") if isinstance(result, dict) else None
-        message = choices[0].get("message", {}) if isinstance(choices, list) and choices else {}
-        content = message.get("content") if isinstance(message, dict) else ""
-        if not content and isinstance(message, dict):
-            content = message.get("reasoning_content")
-        if not content and isinstance(choices, list) and choices:
-            content = choices[0].get("text")
-        if not content and isinstance(result, dict):
-            content = result.get("output_text") or result.get("content") or result.get("response")
-    try:
-        return parse_llm_json_payload(content)
-    except RuntimeError as exc:
-        # Some compatible gateways return the JSON object directly instead of a
-        # chat-completion envelope. Accept that shape when it is unambiguous.
-        if isinstance(result, dict) and any(key in result for key in ("ok", "topics", "queries", "title")):
-            return result
-        raise RuntimeError(f"{provider_name} 未返回可解析的内容：{exc}") from exc
+    retry_parse = protocol == "openai" and is_deepseek_provider(provider, base_url)
+    parse_error = None
+    attempts = 2 if retry_parse else 1
+    for attempt in range(attempts):
+        request_body = dict(body)
+        if attempt and protocol == "openai":
+            request_body["messages"] = [
+                {"role": "system", "content": system_prompt + " Return one complete JSON object in the final answer; do not return an empty answer."},
+                {"role": "user", "content": prompt},
+            ]
+        req = urllib.request.Request(
+            endpoint,
+            data=json.dumps(request_body, ensure_ascii=False).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with open_public_request(req, timeout=timeout) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"{provider_name} 请求失败: {exc.code} {detail}") from exc
+        except ExternalNetworkError as exc:
+            raise RuntimeError(f"{provider_name} 网络连接失败：{exc}") from exc
+        except RuntimeError:
+            raise
+        except (urllib.error.URLError, OSError) as exc:
+            reason = getattr(exc, "reason", exc)
+            raise RuntimeError(f"{provider_name} 网络连接失败：{reason}") from exc
+        if protocol == "anthropic":
+            content = result.get("content")
+        else:
+            choices = result.get("choices") if isinstance(result, dict) else None
+            message = choices[0].get("message", {}) if isinstance(choices, list) and choices else {}
+            content = message.get("content") if isinstance(message, dict) else ""
+            if not content and isinstance(choices, list) and choices:
+                content = choices[0].get("text")
+            if not content and isinstance(result, dict):
+                content = result.get("output_text") or result.get("content") or result.get("response")
+        try:
+            return parse_llm_json_payload(content)
+        except RuntimeError as exc:
+            # Some compatible gateways return the JSON object directly instead of a
+            # chat-completion envelope. Accept that shape when it is unambiguous.
+            if isinstance(result, dict) and any(key in result for key in ("ok", "topics", "queries", "title")):
+                return result
+            parse_error = exc
+            if attempt + 1 < attempts:
+                continue
+    raise RuntimeError(f"{provider_name} 未返回可解析的内容：{parse_error}") from parse_error
 
 
 def test_llm_provider(provider_id=None):

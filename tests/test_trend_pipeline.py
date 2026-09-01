@@ -777,6 +777,58 @@ class TrendPipelineTests(unittest.TestCase):
         self.assertEqual(app.parse_llm_json_payload("说明如下：\n```json\n{\"ok\": true}\n```"), {"ok": True})
         self.assertEqual(app.parse_llm_json_payload([{"type": "text", "text": "{\"ok\": true}"}]), {"ok": True})
 
+    def test_deepseek_llm_json_request_enables_json_mode_and_budget(self):
+        provider = {
+            "id": "provider-test",
+            "name": "我的ds",
+            "api_key": "test-key",
+            "base_url": "https://api.deepseek.com",
+            "protocol": "openai",
+            "model": "deepseek-v4-pro",
+            "enabled": True,
+        }
+        response = type("Response", (), {
+            "read": lambda self: b'{"choices":[{"message":{"content":"{\\"ok\\":true}"}}]}',
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *_args: False,
+        })()
+        with patch.object(app, "enabled_provider", return_value=provider), \
+             patch.object(app, "open_public_request", return_value=response) as open_request:
+            result = app.llm_json("Return JSON", provider_id="provider-test", max_tokens=8192)
+
+        self.assertEqual(result, {"ok": True})
+        request = open_request.call_args.args[0]
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(body["max_tokens"], 8192)
+        self.assertEqual(body["response_format"], {"type": "json_object"})
+        self.assertEqual(body["thinking"], {"type": "disabled"})
+
+    def test_deepseek_llm_json_retries_empty_final_content(self):
+        provider = {
+            "id": "provider-test",
+            "name": "我的ds",
+            "api_key": "test-key",
+            "base_url": "https://api.deepseek.com",
+            "protocol": "openai",
+            "model": "deepseek-v4-pro",
+            "enabled": True,
+        }
+
+        def make_response(content):
+            payload = json.dumps({"choices": [{"message": {"content": content}}]}).encode("utf-8")
+            return type("Response", (), {
+                "read": lambda self: payload,
+                "__enter__": lambda self: self,
+                "__exit__": lambda self, *_args: False,
+            })()
+
+        with patch.object(app, "enabled_provider", return_value=provider), \
+             patch.object(app, "open_public_request", side_effect=[make_response(""), make_response('{"ok":true}')]) as open_request:
+            result = app.llm_json("Return JSON", provider_id="provider-test", max_tokens=8192)
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(open_request.call_count, 2)
+
     def test_clip_analysis_reuses_shared_llm_request_path(self):
         provider = {
             "id": "provider-test",
