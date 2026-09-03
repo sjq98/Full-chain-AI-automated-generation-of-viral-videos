@@ -5815,7 +5815,10 @@ def deepseek_analyze(job_id, payload, task_id=None):
     target_count = int(payload.get("target_clip_count") or 5)
     min_seconds = int(payload.get("min_seconds") or 60)
     max_seconds = int(payload.get("max_seconds") or 90)
-    candidate_count = min(80, max(target_count * 2, target_count + 12))
+    # Keep the response bounded as the requested clip count grows. Each clip
+    # carries several Chinese copy fields, so asking for a large surplus can
+    # make the model return an empty or incomplete candidate array.
+    candidate_count = min(40, max(target_count + 3, target_count * 3 // 2))
     prompt = f"""You are a senior Chinese short-video editor, quote curator, and story producer.
 Your job is to find a broad candidate pool of moments that may become strong short-video highlight clips. The backend will strictly filter, deduplicate, and rank your candidates, so do not force weak moments just to fill the quota.
 
@@ -5914,12 +5917,75 @@ Transcript:
         max_tokens=8192,
     )
 
-    if task_id:
-        wait_for_clip_task_resume(task_id)
-    candidates = []
     duration = float(meta.get("duration") or 0)
     min_len = max(1.0, float(min_seconds))
     max_len = max(min_len, float(max_seconds))
+
+    def has_usable_model_candidate(value):
+        """Detect a candidate that can survive the backend's basic filters."""
+        if not isinstance(value, dict) or not isinstance(value.get("clips"), list):
+            return False
+        for clip in value["clips"]:
+            if not isinstance(clip, dict):
+                continue
+            try:
+                raw_start = float(clip.get("start", 0))
+                raw_end = float(clip.get("end", 0))
+                padding_before = min(2.0, max(0.0, float(clip.get("padding_before", 0) or 0)))
+                padding_after = min(2.0, max(0.0, float(clip.get("padding_after", 0) or 0)))
+                confidence = float(clip.get("confidence", 0) or 0)
+                quote_score = float(clip.get("quote_score", 0) or 0)
+                context_score = float(clip.get("context_score", 0) or 0)
+                edit_score = float(clip.get("edit_score", 0) or 0)
+                viral_score = float(clip.get("viral_score", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            start = max(0, raw_start - padding_before)
+            end = raw_end + padding_after
+            if duration:
+                end = min(duration, end)
+            clip_len = end - start
+            if clip_len <= 0 or (confidence and confidence < 0.60):
+                continue
+            if clip_len < max(2.0, min_len * 0.60) or clip_len > max_len * 1.25:
+                continue
+            score = (
+                quote_score * 0.38
+                + context_score * 0.24
+                + edit_score * 0.22
+                + viral_score * 0.16
+                + confidence * 100 * 0.12
+            )
+            if score >= 56:
+                return True
+        return False
+
+    # A valid JSON object with no candidate that can survive the backend's
+    # basic filters is not a successful analysis. Retry once with a smaller,
+    # explicit output request instead of silently saving zero clips.
+    if not has_usable_model_candidate(highlights):
+        retry_candidate_count = min(candidate_count, max(target_count, target_count + 2))
+        retry_prompt = prompt.replace(
+            f"Raw candidate pool to return: up to {candidate_count}",
+            f"Raw candidate pool to return: up to {retry_candidate_count}",
+        )
+        retry_prompt += """
+
+Previous response produced no usable candidates. Return a complete JSON object now.
+Return only the strongest usable clips, with numeric start/end seconds, valid scores,
+confidence >= 0.60, and durations inside the requested range. Do not return an empty
+clips array when the transcript contains any complete, self-contained moments.
+"""
+        highlights = llm_json(
+            retry_prompt,
+            provider_id=provider.get("id") or payload.get("provider_id"),
+            timeout=330,
+            max_tokens=8192,
+        )
+
+    if task_id:
+        wait_for_clip_task_resume(task_id)
+    candidates = []
 
     def clip_text_key(clip):
         text = " ".join(str(clip.get(k) or "") for k in ("title", "quote", "hook_text", "cover_text"))

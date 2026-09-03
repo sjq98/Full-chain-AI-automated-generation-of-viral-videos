@@ -876,6 +876,83 @@ class TrendPipelineTests(unittest.TestCase):
         self.assertEqual(llm_request.call_args.kwargs["timeout"], 330)
         self.assertEqual(llm_request.call_args.kwargs["max_tokens"], 8192)
 
+    def test_clip_analysis_retries_empty_model_candidates_for_ten_requested_clips(self):
+        provider = {
+            "id": "provider-test",
+            "name": "deepseek",
+            "api_key": "test-key",
+            "base_url": "https://api.deepseek.com",
+            "protocol": "openai",
+            "model": "deepseek-v4-pro",
+            "enabled": True,
+        }
+
+        labels = [
+            "效率不是速度",
+            "先做再优化",
+            "产品要有取舍",
+            "长期主义复利",
+            "信任来自兑现",
+            "问题决定答案",
+            "边界带来自由",
+            "复盘改变结果",
+            "专注创造优势",
+            "表达需要结构",
+        ]
+
+        def valid_clip(index):
+            start = 20 + index * 100
+            label = labels[index]
+            return {
+                "id": f"model_{index}",
+                "title": label,
+                "suggested_title": label,
+                "alternate_title": label,
+                "quote": f"{label}。",
+                "reason": "观点明确，具备独立传播价值。",
+                "original_copy": "这是一段经过整理的完整口述内容。",
+                "xiaohongshu_copy": "一个清晰观点，值得反复思考。",
+                "comment_prompt": "你认同这个观点吗？",
+                "hashtags": ["观点", "成长"],
+                "recommendation_label": "主推 · 强观点",
+                "hook_text": label,
+                "cover_text": label,
+                "editor_note": "保留前后各半秒呼吸。",
+                "start": start,
+                "end": start + 65,
+                "padding_before": 0,
+                "padding_after": 0,
+                "clip_type": "golden_quote",
+                "quote_score": 90,
+                "context_score": 88,
+                "edit_score": 86,
+                "viral_score": 84,
+                "confidence": 0.9,
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            base_dir = Path(directory)
+            (base_dir / "transcript_grouped.json").write_text(json.dumps({
+                "groups": [{"id": 1, "start": 0, "end": 1100, "text": "完整的测试文字稿。"}]
+            }, ensure_ascii=False), encoding="utf-8")
+            (base_dir / "transcript.json").write_text(json.dumps({"segments": []}), encoding="utf-8")
+            (base_dir / "metadata.json").write_text(json.dumps({"title": "测试视频", "duration": 1100}, ensure_ascii=False), encoding="utf-8")
+            with (
+                patch.object(app, "job_dir", return_value=base_dir),
+                patch.object(app, "enabled_provider", return_value=provider),
+                patch.object(app, "llm_json", side_effect=[{"clips": []}, {"clips": [valid_clip(index) for index in range(10)]}]) as llm_request,
+                patch.object(app, "save_highlights"),
+            ):
+                result = app.deepseek_analyze(
+                    "job-test",
+                    {"target_clip_count": 10, "min_seconds": 60, "max_seconds": 90},
+                )
+
+        self.assertEqual(len(result["clips"]), 10)
+        self.assertEqual(llm_request.call_count, 2)
+        self.assertIn("Raw candidate pool to return: up to 15", llm_request.call_args_list[0].args[0])
+        self.assertIn("previous response produced no usable candidates", llm_request.call_args_list[1].args[0].lower())
+
     def test_trend_query_planning_does_not_call_llm(self):
         with patch.object(app, "llm_json", side_effect=AssertionError("query planning should be local")):
             queries, focus = app.plan_trend_discovery_queries([{"主题": "任意偏好"}])
